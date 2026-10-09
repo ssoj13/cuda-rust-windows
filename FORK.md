@@ -142,6 +142,25 @@ from upstream:
 
 ## Current Divergence Log
 
+## 2026-10-09 - ssoj13/cuda-rust-windows: inline intent, Rust 1.99, monorepo sync
+
+- Branch: `main` of `ssoj13/cuda-rust-windows` (renamed from cuda-oxide-windows),
+  tracking `ansidium/cuda-rust-windows` main (`upstream` remote).
+- Upstream baseline: ansidium `dbaf94819` (NVIDIA/cuda-rust monorepo layout), merged
+  in `11c034bcb`.
+- Files/area: `cuda-oxide/crates/{reserved-oxide-symbols,dialect-mir,mir-importer,
+  mir-transforms,mir-lower,llvm-export,rustc-codegen-cuda}` (inline intent);
+  `cuda-oxide/crates/cargo-oxide/src/backend.rs` (pinned backend source).
+- Intentional divergence: every Rust `#[inline]` intent reaches LLVM (`#[inline]` ->
+  `inlinehint`, `always`/`force` -> `alwaysinline`, `never` -> `noinline`) through
+  `InlineIntent` / `MirFuncOp::inline_intent` and `llvm_func_attrs`; upstream only
+  emits `alwaysinline` (NVIDIA #188). The cargo-oxide backend pin points at this
+  fork. The Rust 1.99 API fixes equal ansidium's and need no divergence.
+- Linux impact: none beyond the inline keywords, which apply on every platform.
+- Windows validation: compiler crate tests, backend check, `vecadd` and
+  `addressof_sharedarray` on an RTX 3080 Ti (eight `noinline` helpers stay functions).
+- Follow-up: offer the inline-intent change upstream (DCO sign-off required).
+
 ## 2026-06-22 - Upstream sync and non-rewriting maintenance
 
 - Branch: `main` Windows release fork branch tracking `upstream/main`.
