@@ -1062,18 +1062,22 @@ pub fn generate_device_code<'tcx>(
     // 2. Sets up thread-local CompilerCtxt
     // 3. Runs our closure with access to stable() conversion
     // 4. Tears down the context and returns our result
-    // Pre-compute `#[inline(always)]` flags before entering the stable_mir
-    // context, since the query lives on `rustc_middle::TyCtxt` and is not
-    // exposed through stable_mir. Preserving this hint avoids making helper
-    // boundaries depend entirely on later optimizer heuristics.
-    let inline_always_flags: Vec<bool> = functions
+    // Pre-compute each function's `#[inline]` intent before entering the
+    // stable_mir context, since the query lives on `rustc_middle::TyCtxt` and
+    // is not exposed through stable_mir. Every variant is preserved (as rustc's
+    // LLVM backend does): helper boundaries, `#[inline(never)]` ones included,
+    // must not depend entirely on later optimizer heuristics.
+    let inline_intents: Vec<Option<reserved_oxide_symbols::InlineIntent>> = functions
         .iter()
         .map(|func| {
-            let def_id = func.instance.def_id();
-            matches!(
-                tcx.codegen_fn_attrs(def_id).inline,
-                rustc_hir::attrs::InlineAttr::Always | rustc_hir::attrs::InlineAttr::Force { .. }
-            )
+            use reserved_oxide_symbols::InlineIntent;
+            use rustc_hir::attrs::InlineAttr;
+            match tcx.codegen_fn_attrs(func.instance.def_id()).inline {
+                InlineAttr::None => None,
+                InlineAttr::Hint => Some(InlineIntent::Hint),
+                InlineAttr::Always | InlineAttr::Force { .. } => Some(InlineIntent::Always),
+                InlineAttr::Never => Some(InlineIntent::Never),
+            }
         })
         .collect();
     let device_mono_reachability: Vec<crate::collector::DeviceMonoReachability> = functions
@@ -1137,11 +1141,11 @@ pub fn generate_device_code<'tcx>(
             .iter()
             .zip(export_names.iter())
             .zip(debug_scope_maps.iter())
-            .zip(inline_always_flags.iter())
+            .zip(inline_intents.iter())
             .zip(device_mono_reachability.iter())
             .filter_map(
                 |(
-                    (((func, (export_name, is_kernel)), debug_source_scopes), is_inline_always),
+                    (((func, (export_name, is_kernel)), debug_source_scopes), inline),
                     reachability,
                 )| {
                     // Use rustc_internal::stable() to convert the Instance.
@@ -1172,7 +1176,7 @@ pub fn generate_device_code<'tcx>(
                         export_name: export_name.clone(),
                         debug_source_scopes: Some(debug_source_scopes.clone()),
                         statement_debug_info,
-                        is_inline_always: *is_inline_always,
+                        inline: *inline,
                     })
                 },
             )
