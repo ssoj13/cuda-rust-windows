@@ -21,8 +21,8 @@ auto-fetch discovery.
 ## Requirements
 
 - Windows 10/11 x86_64.
-- Rustup with the stable toolchain selected by the cuda-oxide repository.
-- CUDA Toolkit 12.x or 13.x, including `nvcc`, `cuda.h`, `cuda.lib`,
+- Rustup with the stable toolchain selected by `cuda-oxide/rust-toolchain.toml`.
+- CUDA Toolkit 13.0+, including `nvcc`, `cuda.h`, `cuda.lib`,
   `nvvm64_*.dll`, `nvJitLink_*.dll`, and `libdevice.10.bc`.
 - Visual Studio 2022 Build Tools with MSVC x64 and a Windows SDK.
 - LLVM/Clang with libclang available on `PATH` or through `LIBCLANG_PATH`.
@@ -42,5 +42,4 @@ automatically from this archive layout.
 The archive does not include CUDA Toolkit DLLs, rustup toolchain DLLs, LLVM, or
 MSVC runtime redistributables. Install those through their normal installers.
 
-This is an unofficial Windows-support fork release, not an official NVIDIA Labs
-release.
+Source: [cuda-rust-windows](https://github.com/ansidium/cuda-rust-windows).

@@ -1,4 +1,4 @@
-# cuda-oxide Windows Fork Policy
+# CUDA Rust Windows Fork Policy
 
 ## Purpose
 
@@ -6,14 +6,16 @@ This fork adds native Windows support for `x86_64-pc-windows-msvc` while
 keeping Linux behavior upstream-compatible. Windows changes cover build
 tools, library discovery, CI, smoke tests, and platform compatibility fixes.
 
-The shared host runtime is pinned to `ansidium/cutile-rs` for MSVC enum ABI
-fixes. The isolated backend uses the in-tree COFF artifact writer; host
-crates use the published artifact format and types.
+The shared host runtime lives at the repository root. SIMT examples use
+those crates through path dependencies; generated standalone projects pin
+the runtime and compiler to one fork revision. The isolated backend uses
+the in-tree COFF artifact writer; host crates use the published artifact
+format and types.
 
 ## Upstream Repository
 
-- Upstream: https://github.com/NVlabs/cuda-oxide
-- Upstream branch: `NVlabs/cuda-oxide` `upstream/main`
+- Upstream: https://github.com/NVIDIA/cuda-rust
+- Upstream branch: `NVIDIA/cuda-rust` `upstream/main`
 - Upstream release baseline: CUDA-Oxide 0.2.1
 - Primary local branch: `main` Windows release fork branch tracking
   `upstream/main`
@@ -23,7 +25,7 @@ crates use the published artifact format and types.
 ## Branch Rules
 
 - `main` remains the Windows release fork branch. It tracks
-  `NVlabs/cuda-oxide` `upstream/main`.
+  `NVIDIA/cuda-rust` `upstream/main`.
 - Short-lived branches may be used for Windows enablement work, experiments,
   CI fixes, and compatibility patches.
 - Keep Windows patches narrow and reviewable. Prefer build-system, path,
@@ -39,7 +41,7 @@ crates use the published artifact format and types.
 Configure the upstream remote once:
 
 ```bash
-git remote add upstream https://github.com/NVlabs/cuda-oxide.git
+git remote add upstream https://github.com/NVIDIA/cuda-rust.git
 git remote -v
 ```
 
@@ -76,19 +78,7 @@ Conflict policy:
 - Update this file only when the resolved result intentionally diverges from
   upstream behavior.
 
-No-GPU sync checks after merge:
-
-```powershell
-cargo fmt --all --check
-cargo test -p cargo-oxide
-cargo test -p cuda-toolkit-discovery -p libnvvm-sys -p nvjitlink-sys
-cargo test -p cuda-host --features async
-cargo test --manifest-path crates/oxide-artifacts/Cargo.toml --features object
-cargo clippy --workspace -- -D warnings
-cargo doc --no-deps --workspace
-```
-
-Run the canonical no-GPU sequence with:
+Run the canonical no-GPU checks from the repository root:
 
 ```powershell
 .\scripts\sync-upstream.ps1 -RunChecks
@@ -110,7 +100,7 @@ On a Windows GPU host, also run the full Windows smoke path:
 cargo oxide doctor
 cargo oxide build vecadd
 cargo oxide run vecadd
-.\scripts\smoketest.ps1
+.\cuda-oxide\scripts\smoketest.ps1
 ```
 
 When a sync changes Windows readiness, update
@@ -121,10 +111,10 @@ release-readiness gaps.
 ## Maintenance Cycle
 
 - Daily and weekly upstream monitor: `.github/workflows/upstream-monitor.yml`
-  compares this fork with `NVlabs/cuda-oxide/main` and opens or updates one
+  compares this fork with `NVIDIA/cuda-rust/main` and opens or updates one
   issue when upstream has new commits.
 - Weekly upstream sync: `.github/workflows/upstream-sync-main.yml` merges
-  `NVlabs/cuda-oxide/main` into `main`, runs `.\scripts\sync-upstream.ps1
+  `NVIDIA/cuda-rust/main` into `main`, runs `.\scripts\sync-upstream.ps1
   -RunChecks -Push`, and opens or updates one issue if the sync fails.
 - Weekly hosted Windows canary: `.github/workflows/windows.yml` runs the
   no-GPU MSVC lane on GitHub-hosted `windows-latest`.
