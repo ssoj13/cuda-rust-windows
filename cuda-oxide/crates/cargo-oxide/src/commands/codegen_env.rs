@@ -21,11 +21,11 @@ pub(super) const ENCODED_RUSTFLAGS_SEPARATOR: char = '\u{1f}';
 pub(super) const FULL_DEBUG_GET_MUT_OUTLINE_CFG: &str =
     "cuda_oxide_internal_outline_disjoint_get_mut_v1";
 
-/// Profile-related rustc flags owned by cuda-oxide.
+/// Profile-related codegen settings owned by cuda-oxide.
 ///
 /// Backend selection and MIR/symbol invariants are always applied separately.
-/// `CargoSelected` deliberately adds no optimization, assertion, or debug-info
-/// flags so Cargo's chosen profile remains authoritative.
+/// `CargoSelected` deliberately pins no optimization, assertion, or debug-info
+/// setting so Cargo's chosen profile remains authoritative.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CodegenProfilePolicy {
     CargoSelected,
@@ -46,23 +46,24 @@ impl CodegenProfilePolicy {
     /// The codegen options this policy pins, in rustc flag order.
     pub(super) fn pinned_options(self) -> &'static [PinnedOption] {
         const OPT_LEVEL: PinnedOption = PinnedOption::new("opt-level", "3", "OPT_LEVEL", "3");
-        const NO_DEBUG_ASSERTIONS: PinnedOption =
+        const NO_ASSERTIONS: PinnedOption =
             PinnedOption::new("debug-assertions", "off", "DEBUG_ASSERTIONS", "false");
-        // rustc normally enables overflow checks together with debug assertions.
-        // Keep them independent: overflow-check MIR changes code shape enough to
-        // break pattern-sensitive device lowerings.
-        const DEBUG_ASSERTIONS: [PinnedOption; 2] = [
-            PinnedOption::new("debug-assertions", "on", "DEBUG_ASSERTIONS", "true"),
-            PinnedOption::new("overflow-checks", "off", "OVERFLOW_CHECKS", "false"),
-        ];
+        const ASSERTIONS: PinnedOption =
+            PinnedOption::new("debug-assertions", "on", "DEBUG_ASSERTIONS", "true");
+        // Overflow-check MIR changes code shape enough to break pattern-sensitive
+        // device lowerings, so it is off in every release-like policy. Pinned
+        // explicitly: rustc derives it from debug assertions, and Cargo's dev
+        // profile (passthrough builds without `--release`) would turn it on.
+        const NO_OVERFLOW_CHECKS: PinnedOption =
+            PinnedOption::new("overflow-checks", "off", "OVERFLOW_CHECKS", "false");
         const DEBUGINFO: PinnedOption = PinnedOption::new("debuginfo", "2", "DEBUG", "2");
         match self {
             Self::CargoSelected => &[],
-            Self::ReleaseLike => &[OPT_LEVEL, NO_DEBUG_ASSERTIONS],
-            Self::ReleaseLikeWithDebugAssertions => {
-                &[OPT_LEVEL, DEBUG_ASSERTIONS[0], DEBUG_ASSERTIONS[1]]
+            Self::ReleaseLike => &[OPT_LEVEL, NO_ASSERTIONS, NO_OVERFLOW_CHECKS],
+            Self::ReleaseLikeWithDebugAssertions => &[OPT_LEVEL, ASSERTIONS, NO_OVERFLOW_CHECKS],
+            Self::ReleaseLikeWithDebugInfo => {
+                &[OPT_LEVEL, NO_ASSERTIONS, NO_OVERFLOW_CHECKS, DEBUGINFO]
             }
-            Self::ReleaseLikeWithDebugInfo => &[OPT_LEVEL, NO_DEBUG_ASSERTIONS, DEBUGINFO],
         }
     }
 }
@@ -77,14 +78,20 @@ impl CodegenProfilePolicy {
 /// cache key and rebuild the whole graph between the two. The rustc flag is
 /// emitted only when incoming rustflags set the same option, since rustflags
 /// follow profile flags on the rustc command line and would otherwise win.
+///
+/// Limits of the profile route: `[profile.<name>.package.<pkg>]` overrides and
+/// `--config profile.*` arguments outrank the environment, and host units
+/// (build scripts, proc-macros) follow Cargo's `build-override` defaults.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PinnedOption {
     /// rustc `-C` option name.
-    pub(super) name: &'static str,
-    pub(super) rustc_value: &'static str,
+    name: &'static str,
+    /// Value in rustc's `-C name=value` spelling.
+    rustc_value: &'static str,
     /// Suffix of the `CARGO_PROFILE_<PROFILE>_` environment key.
-    pub(super) cargo_key: &'static str,
-    pub(super) cargo_value: &'static str,
+    cargo_key: &'static str,
+    /// Value in Cargo's profile spelling.
+    cargo_value: &'static str,
 }
 
 impl PinnedOption {
@@ -107,26 +114,56 @@ impl PinnedOption {
     }
 }
 
-/// Base Cargo profiles that receive the pins. Release-like routes run
-/// `--release`, but passthrough builds take the profile from the user's Cargo
-/// arguments; custom profiles inherit from one of these two.
-const PINNED_CARGO_PROFILES: [&str; 2] = ["RELEASE", "DEV"];
+/// Base Cargo profiles that always receive the pins: release-like routes run
+/// `--release`, passthrough builds may run the default dev profile, and custom
+/// profiles inherit unset keys from one of the two.
+const BASE_CARGO_PROFILES: [&str; 2] = ["RELEASE", "DEV"];
 
-/// Set the policy's pins on every base Cargo profile.
+/// Set the policy's pins on the base Cargo profiles and on the profile the
+/// command selects with `--profile`, which may set the pinned keys itself.
 pub(super) fn apply_profile_pins(cmd: &mut Command, profile: CodegenProfilePolicy) {
-    for option in profile.pinned_options() {
-        for base in PINNED_CARGO_PROFILES {
+    let pins = profile.pinned_options();
+    if pins.is_empty() {
+        return;
+    }
+    let mut profiles: Vec<String> = BASE_CARGO_PROFILES.map(String::from).into();
+    if let Some(selected) = selected_cargo_profile(cmd)
+        && !profiles.contains(&selected)
+    {
+        profiles.push(selected);
+    }
+    for option in pins {
+        for name in &profiles {
             cmd.env(
-                format!("CARGO_PROFILE_{base}_{}", option.cargo_key),
+                format!("CARGO_PROFILE_{name}_{}", option.cargo_key),
                 option.cargo_value,
             );
         }
     }
 }
 
-/// Names of the `-C` options a rustflags list sets, including the `-O`
-/// (`opt-level`) and `-g` (`debuginfo`) shorthands.
-pub(super) fn codegen_option_names(flags: &[String]) -> Vec<&str> {
+/// The `--profile` a Cargo command selects, in its environment-key spelling
+/// (`release-lto` -> `RELEASE_LTO`). Arguments after `--` belong to the program.
+fn selected_cargo_profile(cmd: &Command) -> Option<String> {
+    let mut args = cmd
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .take_while(|arg| arg != "--");
+    let mut selected = None;
+    while let Some(arg) = args.next() {
+        if arg == "--profile" {
+            selected = args.next().map(|name| name.into_owned());
+        } else if let Some(name) = arg.strip_prefix("--profile=") {
+            selected = Some(name.to_string());
+        }
+    }
+    selected.map(|name| name.to_uppercase().replace('-', "_"))
+}
+
+/// Names of the `-C` options a rustflags list sets, normalized to rustc's
+/// dashed spelling, including the `-O` (`opt-level`) and `-g` (`debuginfo`)
+/// shorthands.
+pub(super) fn codegen_option_names(flags: &[String]) -> Vec<String> {
     let mut names = Vec::new();
     let mut tokens = flags.iter().map(String::as_str);
     while let Some(token) = tokens.next() {
@@ -139,7 +176,8 @@ pub(super) fn codegen_option_names(flags: &[String]) -> Vec<&str> {
                 .or_else(|| token.strip_prefix("-C")),
         };
         if let Some(setting) = setting {
-            names.push(setting.split_once('=').map_or(setting, |(name, _)| name));
+            let name = setting.split_once('=').map_or(setting, |(name, _)| name);
+            names.push(name.replace('_', "-"));
         }
     }
     names
@@ -249,7 +287,7 @@ pub(super) fn build_encoded_rustflags_with_existing(
     let pin_flags: Vec<String> = profile
         .pinned_options()
         .iter()
-        .filter(|option| overridden.contains(&option.name))
+        .filter(|option| overridden.iter().any(|name| name == option.name))
         .map(|option| option.rustc_flag())
         .collect();
     flags.push(format!("-Zcodegen-backend={}", backend_so.display()));
