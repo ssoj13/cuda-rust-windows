@@ -156,10 +156,19 @@ from upstream:
   `InlineIntent` / `MirFuncOp::inline_intent` and `llvm_func_attrs`; upstream only
   emits `alwaysinline` (NVIDIA #188). The cargo-oxide backend pin points at this
   fork. The Rust 1.99 API fixes equal ansidium's and need no divergence.
-- Linux impact: none beyond the inline keywords, which apply on every platform.
+- Intentional divergence (cargo-oxide, `commands/codegen_env.rs`): release-like
+  routes pin opt-level / debug-assertions / overflow-checks / debuginfo through
+  `CARGO_PROFILE_{RELEASE,DEV,<--profile>}_*` (`CodegenProfilePolicy::pinned_options`)
+  instead of trailing `-C` rustflags; a `-C` pin is appended only when incoming
+  rustflags set the same option. Upstream's rustflags changed every crate's cache
+  key, so `build` after `test -- --release` rebuilt the whole graph (~680 crates).
+- Linux impact: none beyond the inline keywords, which apply on every platform. The
+  profile pins apply on every platform; embedded PTX of WarpBro is byte-identical.
 - Windows validation: compiler crate tests, backend check, `vecadd` and
-  `addressof_sharedarray` on an RTX 3080 Ti (eight `noinline` helpers stay functions).
-- Follow-up: offer the inline-intent change upstream (DCO sign-off required).
+  `addressof_sharedarray` on an RTX 3080 Ti (eight `noinline` helpers stay functions);
+  cargo-oxide tests (259); WarpBro fresh target: tests, then `build` compiles 1 crate.
+- Follow-up: offer the inline-intent and profile-pin changes upstream (DCO sign-off
+  required).
 
 ## 2026-06-22 - Upstream sync and non-rewriting maintenance
 
