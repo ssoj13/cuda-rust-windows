@@ -886,6 +886,19 @@ impl From<std::io::Error> for DeviceCodegenError {
 ///                     │
 ///                     └──▶ PTX (.ptx) via `llc`
 /// ```
+/// Whether this `#[inline(never)]` is the one `#[device]` puts on the prefixed
+/// function of a *generic* device function (cuda-macros
+/// `generate_device_function`). It keeps each monomorphization a separate item
+/// for the collector, a host-side requirement rather than a device-code intent;
+/// as `noinline` it would keep every call and stop const-generic arguments from
+/// folding into their callers. The macro's attribute precedes the user's, so
+/// rustc already reports any inline attribute the user adds there as unused and
+/// no user intent is dropped here.
+fn is_generic_device_collector_boundary<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> bool {
+    !instance.args.is_empty()
+        && reserved_oxide_symbols::is_device_symbol(tcx.item_name(instance.def_id()).as_str())
+}
+
 pub fn generate_device_code<'tcx>(
     tcx: TyCtxt<'tcx>,
     functions: &[CollectedFunction<'tcx>],
@@ -1066,7 +1079,8 @@ pub fn generate_device_code<'tcx>(
     // stable_mir context, since the query lives on `rustc_middle::TyCtxt` and
     // is not exposed through stable_mir. Every variant is preserved (as rustc's
     // LLVM backend does): helper boundaries, `#[inline(never)]` ones included,
-    // must not depend entirely on later optimizer heuristics.
+    // must not depend entirely on later optimizer heuristics. The one exception
+    // is the collector boundary `#[device]` adds to generic device functions.
     let inline_intents: Vec<Option<reserved_oxide_symbols::InlineIntent>> = functions
         .iter()
         .map(|func| {
@@ -1076,6 +1090,9 @@ pub fn generate_device_code<'tcx>(
                 InlineAttr::None => None,
                 InlineAttr::Hint => Some(InlineIntent::Hint),
                 InlineAttr::Always | InlineAttr::Force { .. } => Some(InlineIntent::Always),
+                InlineAttr::Never if is_generic_device_collector_boundary(tcx, func.instance) => {
+                    None
+                }
                 InlineAttr::Never => Some(InlineIntent::Never),
             }
         })
