@@ -339,6 +339,33 @@ pub(super) fn inspect_oxide_config(workspace_root: &Path) -> OxideConfigInspecti
             }
         },
     };
+    let mut env = env;
+    // `cubin-archs` is sugar for `[env] CUDA_OXIDE_CUBIN_ARCHS`, so it reaches
+    // the backend, and the codegen fingerprint, through the one `[env]` path.
+    match optional_config_string_array(table, "cubin-archs", &config_path) {
+        Ok(archs) if archs.is_empty() => {}
+        Ok(archs) => {
+            let mut normalized = Vec::with_capacity(archs.len());
+            for arch in &archs {
+                match parse_nvvm_arch(arch) {
+                    Ok(parsed) => normalized.push(parsed.sm()),
+                    Err(error) => errors.push(format!(
+                        "cuda-oxide config {} field `cubin-archs`: {error}",
+                        config_path.display()
+                    )),
+                }
+            }
+            if env.iter().any(|(key, _)| key == CUBIN_ARCHS_ENV) {
+                errors.push(format!(
+                    "cuda-oxide config {} sets both `cubin-archs` and `[env] {CUBIN_ARCHS_ENV}`; keep one",
+                    config_path.display()
+                ));
+            } else {
+                env.push((CUBIN_ARCHS_ENV.to_string(), normalized.join(",")));
+            }
+        }
+        Err(error) => errors.push(error),
+    }
 
     if !errors.is_empty() {
         return OxideConfigInspection::Invalid { errors, warnings };

@@ -142,6 +142,34 @@ from upstream:
 
 ## Current Divergence Log
 
+## 2026-10-10 - Ahead-of-time cubins in a fat binary
+
+- Branch: `feat/fatbin-archs`, merged into `main` of `ssoj13/cuda-rust-windows`.
+- Upstream baseline: fork `main` 6a2907ae5.
+- Files/area: `cuda-artifact-finalizer` (`tool.rs`: pinned `ptxas` / `fatbinary`
+  shared by `PtxAssembler` and the new `FatbinBuilder`; errors `ToolNotFound` /
+  `InvalidTool` / `ToolFailed` replace the ptxas-only variants), `rustc-codegen-cuda`
+  (`materialize.rs`, `lib.rs`), `cargo-oxide` (`cubin-archs` config key, fingerprint),
+  `cuda-host` and root `cuda-core` loaders, `ptx-schedule` artifact patching,
+  `reserved-oxide-symbols` (`CUBIN_ARCHS_ENV`).
+- Intentional divergence: `cubin-archs` / `CUDA_OXIDE_CUBIN_ARCHS` assembles the linked
+  PTX with `ptxas` for each listed architecture and embeds one compressed fat binary in
+  the bundle's `Cubin` slot, ahead of the unchanged PTX. Loaders fall back to the PTX
+  when the driver rejects the binary image. The fat binary reuses the `Cubin` payload
+  kind because a new kind would break every oxide-artifacts 0.2.1 reader. Measured on
+  WarpBro (22 kernels): four cubins sm_75/86/89/120 compress to 6.1 MB against 8.9 MB
+  of PTX; load 0.02 s against a 97 s cold PTX JIT. The LTO route of
+  `--materialize-cubin` produced a 23 MB cubin in ~15 min for one architecture.
+- Linux impact: none unless the option is set.
+- Windows validation: finalizer, backend, cargo-oxide (260), cuda-host, cuda-core and
+  ptx-schedule tests; live ptxas/fatbinary tests; `constant_memory` with a fat binary
+  for this GPU, with one for another GPU (PTX fallback), and without one.
+- Known limits: `checked_targets` compares capability only (an `a`/`f` PTX target that
+  ptxas cannot retarget fails loudly in ptxas); a ptx-schedule campaign on a fat-binary
+  executable times its baseline from the cubins and its variants through the PTX JIT;
+  `examples-compile.yml` reads payload 0 and does not exercise the option.
+- Follow-up: offer upstream together with the constant-memory fix.
+
 ## 2026-10-09 - ssoj13/cuda-rust-windows: inline intent, Rust 1.99, monorepo sync
 
 - Branch: `main` of `ssoj13/cuda-rust-windows` (renamed from cuda-oxide-windows),

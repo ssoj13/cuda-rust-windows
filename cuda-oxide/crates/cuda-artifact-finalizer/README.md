@@ -15,6 +15,14 @@ already-linked PTX without loading libNVVM, nvJitLink, or the CUDA Driver.
 Set `CUDA_OXIDE_PTXAS` to select an explicit executable; otherwise toolkit
 roots and `PATH` are searched.
 
+`FatbinBuilder` pairs that assembler with toolkit `fatbinary` (explicit
+override `CUDA_OXIDE_FATBINARY`, same search otherwise). It assembles one PTX
+module for several architectures in parallel and packs the cubins into one
+compressed fat binary; the backend embeds it ahead of the PTX when
+`CUDA_OXIDE_CUBIN_ARCHS` is set. Both executables are pinned like `ptxas`, and
+`FatbinBuilder::tool_digest` lets cargo-oxide key its codegen fingerprint on
+them.
+
 Keeping that policy in one driverless crate is what lets the two paths agree.
 A rule that lived in the runtime loader alone could not be applied during a
 build, and one duplicated across both would drift.

@@ -11,14 +11,17 @@
 //! FMA, debug, input-order, validation, and provenance rules.
 
 mod diagnostics;
+mod fatbin;
 mod link;
 mod nvvm;
 mod options;
 mod provenance;
 mod ptx;
+mod tool;
 mod validation;
 
 pub use diagnostics::KernelResourceUsage;
+pub use fatbin::{FatbinBuilder, FatbinReport, is_valid_fatbin};
 pub use libnvvm_sys::{CudaArch, CudaArchParseError, LibdeviceNotFound, NvvmError, find_libdevice};
 pub use link::{LinkReport, LtoLinker};
 pub use nvjitlink_sys::NvJitLinkError;
@@ -45,27 +48,35 @@ pub enum FinalizerError {
     #[error("nvJitLink: {0}")]
     NvJitLink(#[from] nvjitlink_sys::NvJitLinkError),
 
-    /// No standalone PTX assembler could be discovered.
+    /// A CUDA Toolkit executable (`ptxas`, `fatbinary`) could not be discovered.
     #[error(
-        "Could not locate ptxas. Set CUDA_OXIDE_PTXAS, CUDA_TOOLKIT_PATH, CUDA_HOME, or CUDA_PATH, or install the CUDA Toolkit. Tried:\n  {tried}"
+        "Could not locate {tool}. Set {env}, CUDA_TOOLKIT_PATH, CUDA_HOME, or CUDA_PATH, or install the CUDA Toolkit. Tried:\n  {tried}"
     )]
-    PtxasNotFound {
+    ToolNotFound {
+        /// Executable name.
+        tool: &'static str,
+        /// Environment variable that names an explicit executable.
+        env: &'static str,
         /// Newline-separated discovery paths.
         tried: String,
     },
 
-    /// A discovered executable was not NVIDIA's PTX assembler.
-    #[error("the discovered ptxas executable is invalid ({path}): {details}")]
-    InvalidPtxas {
+    /// A discovered executable was not the expected NVIDIA tool.
+    #[error("the discovered {tool} executable is invalid ({path}): {details}")]
+    InvalidTool {
+        /// Executable name.
+        tool: &'static str,
         /// Candidate executable path.
         path: PathBuf,
         /// Version-probe failure details.
         details: String,
     },
 
-    /// `ptxas` rejected the supplied PTX or options.
-    #[error("ptxas failed with {status}: {diagnostics}")]
-    PtxasFailed {
+    /// A CUDA Toolkit executable rejected its inputs or options.
+    #[error("{tool} failed with {status}: {diagnostics}")]
+    ToolFailed {
+        /// Executable name.
+        tool: &'static str,
         /// Process exit status.
         status: String,
         /// Combined standard output and error diagnostics.
@@ -125,6 +136,23 @@ pub enum FinalizerError {
     /// A CUDA finalization tool returned bytes that are not a complete CUDA ELF image.
     #[error("CUDA artifact finalization returned an invalid or truncated cubin")]
     InvalidCubin,
+
+    /// `fatbinary` returned bytes that do not start with a fat binary header.
+    #[error("fatbinary returned an invalid or truncated fat binary")]
+    InvalidFatbin,
+
+    /// A fat binary was requested for a GPU older than the PTX it is built from.
+    #[error(
+        "cannot assemble {requested} cubin from PTX targeting {ptx_target}; every fat binary architecture must be at least the PTX target"
+    )]
+    FatbinTargetBelowPtx {
+        requested: String,
+        ptx_target: String,
+    },
+
+    /// A fat binary was requested without any cubin architecture.
+    #[error("a fat binary needs at least one cubin architecture")]
+    NoFatbinTargets,
 
     /// nvJitLink returned no PTX bytes.
     #[error("nvJitLink returned an empty PTX artifact")]

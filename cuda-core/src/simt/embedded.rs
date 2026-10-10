@@ -22,9 +22,8 @@ pub struct EmbeddedModule {
 
 impl EmbeddedModule {
     pub fn new(bundle: OwnedArtifactBundle) -> Option<Self> {
-        loadable_payload(&bundle)
-            .is_some()
-            .then_some(Self { bundle })
+        let loadable = loadable_payloads(&bundle).next().is_some();
+        loadable.then_some(Self { bundle })
     }
 
     pub fn name(&self) -> &str {
@@ -43,11 +42,21 @@ impl EmbeddedModule {
         self.bundle.payload(kind)
     }
 
+    /// Load the binary image (cubin or fat binary) if the driver accepts it,
+    /// otherwise the PTX: an ahead-of-time image only saves the load-time JIT,
+    /// so a driver too old for its format, or a GPU it holds no code for,
+    /// still gets the PTX. The last driver error is returned if none loads.
     pub fn load(&self, ctx: &Arc<CudaContext>) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
-        let image =
-            loadable_payload(&self.bundle).expect("EmbeddedModule always has a loadable payload");
-        ctx.load_module_from_image(image)
-            .map_err(EmbeddedModuleError::Driver)
+        let mut last_error = None;
+        for image in loadable_payloads(&self.bundle) {
+            match ctx.load_module_from_image(image) {
+                Ok(module) => return Ok(module),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(EmbeddedModuleError::Driver(
+            last_error.expect("EmbeddedModule always has a loadable payload"),
+        ))
     }
 }
 
@@ -100,10 +109,11 @@ pub fn load_first_embedded_module(
     module.load(ctx)
 }
 
-fn loadable_payload(bundle: &OwnedArtifactBundle) -> Option<&[u8]> {
-    bundle
-        .payload(ArtifactPayloadKind::Cubin)
-        .or_else(|| bundle.payload(ArtifactPayloadKind::Ptx))
+/// Driver-loadable payloads in preference order: binary image, then PTX.
+fn loadable_payloads(bundle: &OwnedArtifactBundle) -> impl Iterator<Item = &[u8]> {
+    [ArtifactPayloadKind::Cubin, ArtifactPayloadKind::Ptx]
+        .into_iter()
+        .filter_map(|kind| bundle.payload(kind))
 }
 
 #[derive(Debug)]

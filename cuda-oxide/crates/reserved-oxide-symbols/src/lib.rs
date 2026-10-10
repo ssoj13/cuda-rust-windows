@@ -72,6 +72,12 @@ pub const MATERIALIZER_PROVENANCE_ENV: &str = "CUDA_OXIDE_INTERNAL_MATERIALIZER_
 /// code remains keyed by the content-derived provenance digest.
 pub const MATERIALIZER_HANDSHAKE_ENV: &str = "CUDA_OXIDE_INTERNAL_MATERIALIZER_HANDSHAKE";
 
+/// Comma-separated GPU architectures (`sm_75,sm_86,...`) whose cubins the
+/// backend assembles from the linked PTX and embeds as one fat binary in
+/// front of the PTX payload. Set by cargo-oxide from `cubin-archs` in
+/// `.cargo/cuda-oxide.toml` or inherited from the environment.
+pub const CUBIN_ARCHS_ENV: &str = "CUDA_OXIDE_CUBIN_ARCHS";
+
 /// Optional comma-separated filter selecting crates that may own device code.
 pub const DEVICE_CODEGEN_CRATE_ENV: &str = "CUDA_OXIDE_DEVICE_CODEGEN_CRATE";
 

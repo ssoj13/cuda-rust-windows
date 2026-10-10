@@ -622,6 +622,9 @@ fn build_interop_device_crate(
         materialization,
     );
     apply_device_arch_hint(&mut cmd, arch, detected_device_arch);
+    // An interop device crate is an intermediate for another crate's link;
+    // a fat binary of its own would only cost ptxas time.
+    cmd.env_remove(CUBIN_ARCHS_ENV);
 
     let status = cmd.status().expect("Failed to build interop device crate");
     if !status.success() {

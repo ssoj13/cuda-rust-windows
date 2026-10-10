@@ -293,15 +293,31 @@ pub fn load_first_embedded_module(
     Err(EmbeddedModuleError::NoModules)
 }
 
+fn report_binary_image_fallback(name: &str, error: &DriverError) {
+    if std::env::var_os("CUDA_OXIDE_VERBOSE").is_some() {
+        eprintln!(
+            "cuda-oxide: the driver rejected the binary image of '{name}' ({error}); loading its PTX"
+        );
+    }
+}
+
 fn load_bundle(
     ctx: &Arc<CudaContext>,
     bundle: &OwnedArtifactBundle,
 ) -> Result<Arc<CudaModule>, EmbeddedModuleError> {
+    let ptx = bundle.payload(ArtifactPayloadKind::Ptx);
     if let Some(cubin) = bundle.payload(ArtifactPayloadKind::Cubin) {
-        return Ok(ctx.load_module_from_image(cubin)?);
+        match ctx.load_module_from_image(cubin) {
+            Ok(module) => return Ok(module),
+            // A binary image built ahead of time (a cubin or a fat binary)
+            // next to PTX only saves the load-time JIT. A driver too old for
+            // its format, or a GPU it holds no code for, still loads the PTX.
+            Err(error) if ptx.is_some() => report_binary_image_fallback(&bundle.name, &error),
+            Err(error) => return Err(error.into()),
+        }
     }
 
-    if let Some(ptx) = bundle.payload(ArtifactPayloadKind::Ptx) {
+    if let Some(ptx) = ptx {
         return Ok(ctx.load_module_from_image(ptx)?);
     }
 

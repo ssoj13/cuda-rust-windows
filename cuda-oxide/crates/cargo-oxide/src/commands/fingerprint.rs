@@ -113,6 +113,23 @@ pub(super) fn passthrough_codegen_fingerprint_with_env(
             owner_filter.as_bytes().to_vec(),
         );
     }
+    // Mirror `apply_output_mode`: an explicit NVVM IR or cubin request drops
+    // `cubin-archs` from the child, so it must not key the artifacts either.
+    if !fatbin_applies(opts.emit_nvvm_ir, materialization) {
+        effective_env.remove(CUBIN_ARCHS_ENV);
+    }
+    // A fat binary embeds ptxas output, so the assembler and packer are
+    // codegen inputs too: a toolkit update must rebuild the device crates.
+    if effective_env.get(CUBIN_ARCHS_ENV).is_some_and(|value| {
+        value
+            .iter()
+            .any(|byte| !byte.is_ascii_whitespace() && *byte != b',')
+    }) {
+        effective_env.insert(
+            FATBIN_TOOLS_KEY.to_string(),
+            fatbin_tool_digest(ctx).to_vec(),
+        );
+    }
 
     // SHA-256 over length-delimited key/value pairs. The complete digest is
     // tracked by device-owning procedural macros, so settings are neither
@@ -123,6 +140,33 @@ pub(super) fn passthrough_codegen_fingerprint_with_env(
         update_codegen_fingerprint_hash(&mut hash, &value);
     }
     finish_codegen_fingerprint(hash)
+}
+
+/// Fingerprint-only key; never exported to the child environment.
+const FATBIN_TOOLS_KEY: &str = "CUDA_OXIDE_INTERNAL_FATBIN_TOOLS";
+
+/// Digest of the `ptxas` and `fatbinary` the backend will discover: the same
+/// finalizer discovery over the environment the child gets (this process,
+/// then project `[env]` defaults, as in `apply_config_env`), computed once per
+/// process. Missing tools hash as a marker: the backend then fails the build
+/// with the discovery error.
+fn fatbin_tool_digest(ctx: &Context) -> [u8; 32] {
+    static DIGEST: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *DIGEST.get_or_init(|| {
+        let child_env = |name: &str| {
+            std::env::var_os(name).or_else(|| {
+                ctx.config
+                    .env
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.into())
+            })
+        };
+        cuda_artifact_finalizer::FatbinBuilder::discover_with_env(child_env)
+            .ok()
+            .and_then(|builder| builder.tool_digest())
+            .unwrap_or([0; 32])
+    })
 }
 
 fn update_codegen_fingerprint_hash(hash: &mut sha2::Sha256, bytes: &[u8]) {

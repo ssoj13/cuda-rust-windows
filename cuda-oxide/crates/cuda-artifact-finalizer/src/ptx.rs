@@ -13,234 +13,13 @@
 
 use crate::diagnostics::parse_ptxas_resource_usage;
 use crate::link::logical_ptx;
-use crate::nvvm::report_changed_tool;
-use crate::provenance::{
-    StableDigest, ToolFileIdentity, digest_file_handle, recipe_digest,
-    with_revalidated_tool_identity,
-};
+use crate::provenance::{StableDigest, recipe_digest};
+use crate::tool::{PTXAS, PinnedTool, TemporaryDirectory};
 use crate::{FinalizationOptions, FinalizerError, LinkReport, NamedInput, is_valid_cubin};
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
-use std::io;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::ffi::OsString;
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt;
-#[cfg(target_os = "linux")]
-use std::os::unix::fs::FileExt;
-
-static TEMP_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TemporaryDirectory {
-    path: PathBuf,
-}
-
-impl TemporaryDirectory {
-    fn new(prefix: &str) -> Result<Self, FinalizerError> {
-        let root = std::env::temp_dir();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        for _ in 0..128 {
-            let sequence = TEMP_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let candidate = root.join(format!(
-                "{prefix}-{}-{timestamp:x}-{sequence:x}",
-                std::process::id()
-            ));
-            let builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            let mut builder = builder;
-            #[cfg(unix)]
-            builder.mode(0o700);
-            match builder.create(&candidate) {
-                Ok(()) => return Ok(Self { path: candidate }),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::Interrupted
-                    ) => {}
-                Err(source) => {
-                    return Err(FinalizerError::Io {
-                        path: candidate,
-                        source,
-                    });
-                }
-            }
-        }
-        Err(FinalizerError::Io {
-            path: root,
-            source: std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "could not allocate a unique PTX assembly directory",
-            ),
-        })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-struct PtxasTool {
-    path: PathBuf,
-    file: File,
-    identity: ToolFileIdentity,
-    digest: [u8; 32],
-    #[cfg(target_os = "linux")]
-    execute_from_fd: bool,
-}
-
-impl PtxasTool {
-    fn open(path: PathBuf) -> Result<Self, FinalizerError> {
-        let file = File::open(&path).map_err(|source| FinalizerError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        if !file
-            .metadata()
-            .map_err(|source| FinalizerError::Io {
-                path: path.clone(),
-                source,
-            })?
-            .is_file()
-        {
-            return Err(FinalizerError::InvalidPtxas {
-                path,
-                details: "candidate is not a regular file".to_string(),
-            });
-        }
-        let identity =
-            ToolFileIdentity::capture(&file).ok_or_else(|| FinalizerError::InvalidPtxas {
-                path: path.clone(),
-                details: "could not capture a stable file identity".to_string(),
-            })?;
-        let digest = digest_file_handle(&file).map_err(|source| FinalizerError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
-        #[cfg(target_os = "linux")]
-        let execute_from_fd = {
-            let mut magic = [0_u8; 4];
-            file.read_exact_at(&mut magic, 0).is_ok() && magic == *b"\x7fELF"
-        };
-
-        let tool = Self {
-            path,
-            file,
-            identity,
-            digest,
-            #[cfg(target_os = "linux")]
-            execute_from_fd,
-        };
-        tool.validate_version()?;
-        Ok(tool)
-    }
-
-    fn validate_version(&self) -> Result<(), FinalizerError> {
-        let output = self.invoke([OsStr::new("--version")])?;
-        let details = combined_diagnostics(&output);
-        let recognized = output.status.success()
-            && details
-                .to_ascii_lowercase()
-                .contains("ptx optimizing assembler");
-        if recognized {
-            Ok(())
-        } else {
-            Err(FinalizerError::InvalidPtxas {
-                path: self.path.clone(),
-                details: if details.is_empty() {
-                    format!("version probe exited with {}", output.status)
-                } else {
-                    details
-                },
-            })
-        }
-    }
-
-    fn invoke<I, S>(&self, args: I) -> Result<Output, FinalizerError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let args = args
-            .into_iter()
-            .map(|arg| arg.as_ref().to_owned())
-            .collect::<Vec<_>>();
-        with_revalidated_tool_identity(
-            "ptxas",
-            Some(self.digest),
-            || self.current_digest(),
-            || {
-                let mut command = self.command();
-                command.args(&args);
-                run_tolerating_busy_text_file(&mut command).map_err(|source| FinalizerError::Io {
-                    path: self.path.clone(),
-                    source,
-                })
-            },
-        )
-    }
-
-    fn current_digest(&self) -> Option<[u8; 32]> {
-        if !self.identity.matches_file(&self.file) {
-            return None;
-        }
-
-        #[cfg(target_os = "linux")]
-        if self.execute_from_fd {
-            return Some(self.digest);
-        }
-
-        let current = File::open(&self.path).ok()?;
-        self.identity.matches_file(&current).then_some(self.digest)
-    }
-
-    fn command(&self) -> Command {
-        #[cfg(target_os = "linux")]
-        if self.execute_from_fd {
-            return Command::new(format!("/proc/self/fd/{}", self.file.as_raw_fd()));
-        }
-
-        Command::new(&self.path)
-    }
-}
-
-/// Runs `command`, retrying briefly when the kernel reports ETXTBSY.
-///
-/// Executing a just-written tool by path can collide with an unrelated
-/// `Command` spawn on another thread: the concurrent fork inherits the
-/// writer's still-open descriptor for the moment before its own exec, and
-/// exec of the tool during that moment fails with "Text file busy". The
-/// descriptor vanishes as soon as that child execs, so a short bounded
-/// retry rides out the collision while a persistent error still surfaces.
-fn run_tolerating_busy_text_file(command: &mut Command) -> io::Result<Output> {
-    let mut delay = Duration::from_millis(2);
-    for _ in 0..8 {
-        match command.output() {
-            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
-                thread::sleep(delay);
-                delay = delay.saturating_mul(2);
-            }
-            result => return result,
-        }
-    }
-    command.output()
-}
 
 /// Driver-independent assembler for one already-linked PTX module.
 ///
@@ -251,7 +30,7 @@ fn run_tolerating_busy_text_file(command: &mut Command) -> io::Result<Output> {
 /// directory and can run concurrently with other calls.
 #[derive(Clone)]
 pub struct PtxAssembler {
-    tool: Arc<PtxasTool>,
+    tool: Arc<PinnedTool>,
 }
 
 impl PtxAssembler {
@@ -261,48 +40,30 @@ impl PtxAssembler {
     /// `CUDA_TOOLKIT_PATH`, `CUDA_HOME`, or `CUDA_PATH`, conventional toolkit
     /// roots, then `PATH`.
     pub fn discover() -> Result<Self, FinalizerError> {
-        let (candidates, explicit) = ptxas_candidates(|name| std::env::var_os(name));
-        let mut tried = Vec::new();
-        let mut first_error = None;
-        for (index, path) in candidates.into_iter().enumerate() {
-            tried.push(path.display().to_string());
-            if !path.is_file() {
-                continue;
-            }
-            match Self::from_path(path) {
-                Ok(assembler) => return Ok(assembler),
-                Err(error) if explicit && index == 0 => return Err(error),
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Err(FinalizerError::PtxasNotFound {
-            tried: tried.join("\n  "),
-        })
+        Ok(Self::from_tool(PinnedTool::discover(PTXAS)?))
     }
 
-    fn from_path(path: PathBuf) -> Result<Self, FinalizerError> {
+    pub(crate) fn from_tool(tool: PinnedTool) -> Self {
+        Self {
+            tool: Arc::new(tool),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn from_path(path: std::path::PathBuf) -> Result<Self, FinalizerError> {
         Ok(Self {
-            tool: Arc::new(PtxasTool::open(path)?),
+            tool: Arc::new(PinnedTool::open(PTXAS, path)?),
         })
     }
 
     /// Path from which the pinned assembler was discovered.
     pub fn ptxas_path(&self) -> &Path {
-        &self.tool.path
+        self.tool.path()
     }
 
     /// Digest of the exact assembler executable, if its identity still holds.
     pub fn ptxas_digest(&self) -> Option<[u8; 32]> {
-        let digest = self.tool.current_digest();
-        if digest.is_none() {
-            report_changed_tool("ptxas");
-        }
-        digest
+        self.tool.digest()
     }
 
     /// Digest every semantic input to standalone PTX assembly.
@@ -369,15 +130,7 @@ impl PtxAssembler {
         arguments.push(output_path.as_os_str().to_owned());
         arguments.push(input_path.as_os_str().to_owned());
 
-        let output = self.tool.invoke(&arguments)?;
-        let diagnostics = combined_diagnostics(&output);
-        if !output.status.success() {
-            return Err(FinalizerError::PtxasFailed {
-                status: output.status.to_string(),
-                diagnostics,
-            });
-        }
-
+        let diagnostics = self.tool.run(&arguments)?;
         let image = fs::read(&output_path).map_err(|source| FinalizerError::Io {
             path: output_path,
             source,
@@ -397,54 +150,6 @@ impl PtxAssembler {
             resource_usage,
         })
     }
-}
-
-fn ptxas_candidates(mut get_env: impl FnMut(&str) -> Option<OsString>) -> (Vec<PathBuf>, bool) {
-    let mut candidates = Vec::new();
-    let explicit = get_env("CUDA_OXIDE_PTXAS");
-    if let Some(path) = explicit.as_ref() {
-        push_unique(&mut candidates, PathBuf::from(path));
-    }
-
-    let executable = if cfg!(windows) { "ptxas.exe" } else { "ptxas" };
-    for variable in ["CUDA_TOOLKIT_PATH", "CUDA_HOME", "CUDA_PATH"] {
-        if let Some(root) = get_env(variable) {
-            push_unique(
-                &mut candidates,
-                PathBuf::from(root).join("bin").join(executable),
-            );
-        }
-    }
-    #[cfg(unix)]
-    for root in ["/usr/local/cuda", "/opt/cuda"] {
-        push_unique(
-            &mut candidates,
-            PathBuf::from(root).join("bin").join(executable),
-        );
-    }
-    if let Some(path) = get_env("PATH") {
-        for directory in std::env::split_paths(&path) {
-            push_unique(&mut candidates, directory.join(executable));
-        }
-    }
-    (candidates, explicit.is_some())
-}
-
-fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !paths.contains(&candidate) {
-        paths.push(candidate);
-    }
-}
-
-fn combined_diagnostics(output: &Output) -> String {
-    let mut diagnostics = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.stderr.is_empty() {
-        if !diagnostics.is_empty() && !diagnostics.ends_with('\n') {
-            diagnostics.push('\n');
-        }
-        diagnostics.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    diagnostics
 }
 
 pub(crate) fn ptx_assembly_artifact_digest_parts(
@@ -470,12 +175,19 @@ pub(crate) fn ptx_assembly_artifact_digest_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
+    #[cfg(unix)]
+    use crate::tool::TemporaryDirectory;
+    #[cfg(unix)]
+    use std::fs::File;
     #[cfg(unix)]
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::time::Duration;
 
     fn options() -> FinalizationOptions {
         FinalizationOptions::new("sm_103a".parse().unwrap())
@@ -564,39 +276,6 @@ fi
         bytes[section + 32..section + 40].copy_from_slice(&(PAYLOAD_LENGTH as u64).to_le_bytes());
         bytes[payload_offset..].copy_from_slice(b"CUDA");
         bytes
-    }
-
-    #[test]
-    fn discovery_order_is_explicit_tool_then_roots_then_path() {
-        let executable = if cfg!(windows) { "ptxas.exe" } else { "ptxas" };
-        let explicit_path = PathBuf::from("explicit").join(executable);
-        let search_path = std::env::join_paths(["first", "second"]).unwrap();
-        let environment = HashMap::from([
-            ("CUDA_OXIDE_PTXAS", explicit_path.clone().into_os_string()),
-            ("CUDA_TOOLKIT_PATH", OsString::from("toolkit")),
-            ("CUDA_HOME", OsString::from("home")),
-            ("CUDA_PATH", OsString::from("cuda-path")),
-            ("PATH", search_path),
-        ]);
-        let (candidates, explicit) = ptxas_candidates(|name| environment.get(name).cloned());
-        assert!(explicit);
-        assert_eq!(candidates[0], explicit_path);
-        assert_eq!(
-            candidates[1],
-            PathBuf::from("toolkit").join("bin").join(executable)
-        );
-        assert_eq!(
-            candidates[2],
-            PathBuf::from("home").join("bin").join(executable)
-        );
-        assert_eq!(
-            candidates[3],
-            PathBuf::from("cuda-path").join("bin").join(executable)
-        );
-        assert!(candidates.ends_with(&[
-            PathBuf::from("first").join(executable),
-            PathBuf::from("second").join(executable)
-        ]));
     }
 
     #[test]
@@ -696,7 +375,7 @@ fi
             .unwrap_err();
         assert!(matches!(
             error,
-            FinalizerError::PtxasFailed { status, diagnostics }
+            FinalizerError::ToolFailed { tool: "ptxas", status, diagnostics }
                 if status.contains("42") && diagnostics.contains("synthetic failure")
         ));
     }

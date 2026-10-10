@@ -860,6 +860,7 @@ fn rebuild_artifact_section(
     let mut section = Vec::new();
 
     for bundle in &mut bundles {
+        let mut patched = false;
         for payload in &mut bundle.payloads {
             let exact_match = payload.kind == ArtifactPayloadKind::Ptx
                 && payload.bytes.as_slice() == pristine_ptx;
@@ -868,7 +869,16 @@ fn rebuild_artifact_section(
             if exact_match || only_ptx_fallback {
                 payload.bytes = mutated_ptx.to_vec();
                 replaced = true;
+                patched = true;
             }
+        }
+        // A binary image (cubin or fat binary) beside that PTX was assembled
+        // from the pristine PTX, and loaders prefer it: keeping it would run
+        // the old code and silently ignore the mutation.
+        if patched {
+            bundle
+                .payloads
+                .retain(|payload| payload.kind != ArtifactPayloadKind::Cubin);
         }
 
         let payloads = bundle
@@ -962,6 +972,37 @@ fn has_mismatch_marker(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Patching the PTX of a bundle drops the binary image built from the
+    /// pristine PTX, since loaders would otherwise prefer that stale image.
+    #[test]
+    fn patched_ptx_drops_the_stale_binary_image() {
+        let spec = ArtifactBundleSpec::new("kernels", "sm_75")
+            .with_payload(ArtifactPayloadSpec::new(
+                ArtifactPayloadKind::Cubin,
+                "kernels.fatbin",
+                b"old image",
+            ))
+            .with_payload(ArtifactPayloadSpec::new(
+                ArtifactPayloadKind::Ptx,
+                "kernels.ptx",
+                b"pristine",
+            ));
+        let blob = build_artifact_blob(&spec).unwrap();
+        let bundles = oxide_artifacts::parse_artifact_section(&blob)
+            .unwrap()
+            .into_iter()
+            .map(oxide_artifacts::OwnedArtifactBundle::from)
+            .collect();
+        let section = rebuild_artifact_section(bundles, b"pristine", b"mutated").unwrap();
+        let rebuilt = oxide_artifacts::parse_artifact_section(&section).unwrap();
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(rebuilt[0].payload(ArtifactPayloadKind::Cubin), None);
+        assert_eq!(
+            rebuilt[0].payload(ArtifactPayloadKind::Ptx),
+            Some(&b"mutated"[..])
+        );
+    }
 
     /// The markers must match the way the smoketest's `grep -i` does, without
     /// the caller having lowercased anything first. Every spelling here is one
