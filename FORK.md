@@ -167,8 +167,13 @@ from upstream:
 - Windows validation: compiler crate tests, backend check, `vecadd` and
   `addressof_sharedarray` on an RTX 3080 Ti (eight `noinline` helpers stay functions);
   cargo-oxide tests (259); WarpBro fresh target: tests, then `build` compiles 1 crate.
-- Follow-up: offer the inline-intent and profile-pin changes upstream (DCO sign-off
-  required).
+- Bug fix carried ahead of upstream (mir-lower `create_device_global`, llvm-export):
+  `#[constant]` globals are retained and exported `externally_initialized`, so the
+  materialized-cubin route (libNVVM `-gen-lto` + nvJitLink `-lto`) keeps the symbol the
+  host writes; before, LTO folded it to zeros and `cuModuleGetGlobal` failed (500).
+  Repro: `cargo oxide run constant_memory --materialize-cubin --arch sm_86`.
+- Follow-up: offer the inline-intent, profile-pin and constant-memory changes upstream
+  (DCO sign-off required; the constant-memory PR branch is `fix/constant-memory-lto`).
 
 ## 2026-06-22 - Upstream sync and non-rewriting maintenance
 
