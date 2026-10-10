@@ -154,7 +154,10 @@ from upstream:
 - Intentional divergence: every Rust `#[inline]` intent reaches LLVM (`#[inline]` ->
   `inlinehint`, `always`/`force` -> `alwaysinline`, `never` -> `noinline`) through
   `InlineIntent` / `MirFuncOp::inline_intent` and `llvm_func_attrs`; upstream only
-  emits `alwaysinline` (NVIDIA #188). The cargo-oxide backend pin points at this
+  emits `alwaysinline` (NVIDIA #188). The `#[inline(never)]` that `#[device]` adds to
+  generic device functions for the collector stays host-only
+  (`is_generic_device_collector_boundary`); carried as `noinline` it broke const-generic
+  folding (`const_generic` example). The cargo-oxide backend pin points at this
   fork. The Rust 1.99 API fixes equal ansidium's and need no divergence.
 - Intentional divergence (cargo-oxide, `commands/codegen_env.rs`): release-like
   routes pin opt-level / debug-assertions / overflow-checks / debuginfo through
