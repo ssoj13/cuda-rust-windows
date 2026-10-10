@@ -99,12 +99,12 @@ pub(crate) enum MaterializeError {
     ProvenanceMismatch { expected: String, actual: String },
 
     #[error(
-        "build-time cubin materialization does not yet support generic #[cuda_module] loading because it merges PTX bundles across crates at run time"
+        "build-time device images (--materialize-cubin, cubin-archs) do not yet support generic #[cuda_module] loading because it merges PTX bundles across crates at run time"
     )]
     RequiresPtxBundleMerge,
 
     #[error(
-        "build-time cubin materialization does not yet support #[device] extern declarations because their ordered external link inputs are not available to the backend"
+        "build-time device images (--materialize-cubin, cubin-archs) do not yet support #[device] extern declarations because their ordered external link inputs are not available to the backend"
     )]
     HasDeviceExterns,
 

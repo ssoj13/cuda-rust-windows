@@ -517,7 +517,18 @@ pub(super) fn apply_output_mode(
     if emit_nvvm_ir || materialization.enabled() {
         cmd.env("CUDA_OXIDE_EMIT_NVVM_IR", "1");
     }
+    if !fatbin_applies(emit_nvvm_ir, materialization) {
+        cmd.env_remove(CUBIN_ARCHS_ENV);
+    }
     materialization.apply(cmd);
+}
+
+/// A fat binary is assembled from PTX, so `cubin-archs` (a project or
+/// environment default) yields to an explicit request for another device
+/// artifact: `--emit-nvvm-ir`, an NVVM IR interop crate, or
+/// `--materialize-cubin`. The codegen fingerprint uses the same rule.
+pub(super) fn fatbin_applies(emit_nvvm_ir: bool, materialization: &MaterializationMode) -> bool {
+    !emit_nvvm_ir && !materialization.enabled()
 }
 
 pub(super) fn configured_arch<'a>(ctx: &'a Context, cli_arch: Option<&'a str>) -> Option<&'a str> {

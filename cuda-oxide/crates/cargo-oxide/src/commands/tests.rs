@@ -3473,6 +3473,26 @@ fn apply_output_mode_leaves_auto_detect_ptx_unset() {
     assert_eq!(command_env(&cmd, "CUDA_OXIDE_EMIT_NVVM_IR"), None);
 }
 
+/// `cubin-archs` is a default: an explicit NVVM IR request removes it from
+/// the child, while the ordinary PTX route keeps it.
+#[test]
+fn apply_output_mode_drops_cubin_archs_for_nvvm_ir() {
+    let mut cmd = Command::new("cargo");
+    cmd.env(CUBIN_ARCHS_ENV, "sm_75,sm_86");
+    apply_output_mode(&mut cmd, false, None, &MaterializationMode::default());
+    assert_eq!(
+        command_env(&cmd, CUBIN_ARCHS_ENV).as_deref(),
+        Some("sm_75,sm_86")
+    );
+
+    apply_output_mode(&mut cmd, true, None, &MaterializationMode::default());
+    assert!(
+        cmd.get_envs()
+            .any(|(key, value)| key == CUBIN_ARCHS_ENV && value.is_none()),
+        "the child must not inherit CUDA_OXIDE_CUBIN_ARCHS"
+    );
+}
+
 #[test]
 fn apply_device_arch_hint_sets_hint_when_no_explicit_arch() {
     let mut cmd = Command::new("cargo");

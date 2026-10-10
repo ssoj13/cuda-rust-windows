@@ -6,9 +6,11 @@
 //! Ahead-of-time cubins for several GPU generations in one fat binary.
 //!
 //! The linked PTX of a crate is assembled once per requested architecture
-//! with toolkit `ptxas` (the same assembler the driver runs when it JIT
-//! compiles that PTX at load time, so the machine code is what the PTX route
-//! produces, only earlier) and the cubins are packed by toolkit `fatbinary`.
+//! with toolkit `ptxas` and the cubins are packed by toolkit `fatbinary`.
+//! This is the compilation the driver performs when it JIT compiles that PTX
+//! at load time, done ahead of time by the toolkit's assembler instead of the
+//! driver's, with the crate's FMA and debug policy (`--fmad`, line info or
+//! `--device-debug`) where the JIT uses its defaults.
 //! The fat binary holds cubins only: the PTX stays a separate artifact payload
 //! so a driver that cannot read the fat binary, or a GPU it has no cubin for,
 //! still loads the PTX.
@@ -16,7 +18,7 @@
 use crate::diagnostics::KernelResourceUsage;
 use crate::link::logical_ptx;
 use crate::provenance::StableDigest;
-use crate::tool::{FATBINARY, PinnedTool, TemporaryDirectory};
+use crate::tool::{FATBINARY, PTXAS, PinnedTool, TemporaryDirectory};
 use crate::{CudaArch, FinalizationOptions, FinalizerError, NamedInput, PtxAssembler};
 use std::ffi::OsString;
 use std::fs;
@@ -46,9 +48,17 @@ impl FatbinBuilder {
     /// Discover both tools; `fatbinary` follows the `ptxas` search order with
     /// `CUDA_OXIDE_FATBINARY` as its explicit override.
     pub fn discover() -> Result<Self, FinalizerError> {
+        Self::discover_with_env(|name| std::env::var_os(name))
+    }
+
+    /// [`Self::discover`] over an explicit environment. cargo-oxide uses it to
+    /// fingerprint the tools its backend child process will discover.
+    pub fn discover_with_env(
+        mut get_env: impl FnMut(&str) -> Option<OsString>,
+    ) -> Result<Self, FinalizerError> {
         Ok(Self {
-            assembler: PtxAssembler::discover()?,
-            fatbinary: Arc::new(PinnedTool::discover(FATBINARY)?),
+            assembler: PtxAssembler::from_tool(PinnedTool::discover_with_env(PTXAS, &mut get_env)?),
+            fatbinary: Arc::new(PinnedTool::discover_with_env(FATBINARY, &mut get_env)?),
         })
     }
 
@@ -71,7 +81,8 @@ impl FatbinBuilder {
     /// `options.target()` is the architecture the PTX was generated for; each
     /// requested architecture must be at least that one, because `ptxas`
     /// cannot lower PTX to an older GPU. FMA and debug policy apply to every
-    /// cubin. Cubins are assembled concurrently, one `ptxas` process each.
+    /// cubin. Cubins are assembled concurrently, at most one `ptxas` process
+    /// per available core.
     pub fn build(
         &self,
         ptx: NamedInput<'_>,
@@ -83,23 +94,30 @@ impl FatbinBuilder {
         let logical = logical_ptx(ptx)?;
         let input = NamedInput::new(ptx.name, logical);
 
-        let reports = std::thread::scope(|scope| {
-            let jobs = targets
-                .iter()
-                .map(|target| {
-                    let options = FinalizationOptions::new(target.clone())
-                        .with_fma_contraction(options.allow_fma_contraction())
-                        .with_debug_policy(options.debug_policy());
-                    scope.spawn(move || self.assembler.assemble_ptx_with_report(input, &options))
-                })
-                .collect::<Vec<_>>();
-            jobs.into_iter()
-                .map(|job| {
-                    job.join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })?;
+        // One ptxas process per cubin, at most one per available core: each
+        // holds the whole module in memory.
+        let workers = std::thread::available_parallelism().map_or(1, usize::from);
+        let mut reports = Vec::with_capacity(targets.len());
+        for batch in targets.chunks(workers) {
+            reports.extend(std::thread::scope(|scope| {
+                let jobs = batch
+                    .iter()
+                    .map(|target| {
+                        let options = FinalizationOptions::new(target.clone())
+                            .with_fma_contraction(options.allow_fma_contraction())
+                            .with_debug_policy(options.debug_policy());
+                        scope
+                            .spawn(move || self.assembler.assemble_ptx_with_report(input, &options))
+                    })
+                    .collect::<Vec<_>>();
+                jobs.into_iter()
+                    .map(|job| {
+                        job.join()
+                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })?);
+        }
 
         let directory = TemporaryDirectory::new("cuda-oxide-fatbin")?;
         let output_path = directory.path().join("module.fatbin");

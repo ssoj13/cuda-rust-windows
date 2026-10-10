@@ -164,6 +164,10 @@ from upstream:
 - Windows validation: finalizer, backend, cargo-oxide (260), cuda-host, cuda-core and
   ptx-schedule tests; live ptxas/fatbinary tests; `constant_memory` with a fat binary
   for this GPU, with one for another GPU (PTX fallback), and without one.
+- Known limits: `checked_targets` compares capability only (an `a`/`f` PTX target that
+  ptxas cannot retarget fails loudly in ptxas); a ptx-schedule campaign on a fat-binary
+  executable times its baseline from the cubins and its variants through the PTX JIT;
+  `examples-compile.yml` reads payload 0 and does not exercise the option.
 - Follow-up: offer upstream together with the constant-memory fix.
 
 ## 2026-10-09 - ssoj13/cuda-rust-windows: inline intent, Rust 1.99, monorepo sync

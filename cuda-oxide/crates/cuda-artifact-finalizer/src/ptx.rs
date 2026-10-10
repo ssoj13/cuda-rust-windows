@@ -40,9 +40,13 @@ impl PtxAssembler {
     /// `CUDA_TOOLKIT_PATH`, `CUDA_HOME`, or `CUDA_PATH`, conventional toolkit
     /// roots, then `PATH`.
     pub fn discover() -> Result<Self, FinalizerError> {
-        Ok(Self {
-            tool: Arc::new(PinnedTool::discover(PTXAS)?),
-        })
+        Ok(Self::from_tool(PinnedTool::discover(PTXAS)?))
+    }
+
+    pub(crate) fn from_tool(tool: PinnedTool) -> Self {
+        Self {
+            tool: Arc::new(tool),
+        }
     }
 
     #[cfg(all(test, unix))]

@@ -475,18 +475,26 @@ architecture and pack the cubins into one compressed fat binary with
 `fatbinary`. The bundle then holds the fat binary in its `Cubin` slot, ahead of
 the unchanged PTX. A supported GPU loads its cubin directly and skips the
 load-time JIT; a driver that cannot read the fat binary, or a GPU it has no
-cubin for, loads the PTX as before. The machine code is what the driver would
-JIT from that PTX, so results do not change.
+cubin for, loads the PTX as before (`CUDA_OXIDE_VERBOSE=1` reports it). The
+cubins are the compilation the driver's JIT would perform on that PTX, done by
+the toolkit's `ptxas` with the build's FMA and debug policy instead of the
+JIT's defaults.
 
 Every listed architecture must be at least the PTX target (`--arch` /
 `default-arch`); build the PTX for the oldest GPU you support. Cubins are
-assembled in parallel, about one to two minutes each for a large module.
-`ptxas` and `fatbinary` are found like `ptxas` everywhere else
-(`CUDA_OXIDE_PTXAS`, `CUDA_OXIDE_FATBINARY`, then the toolkit roots and
-`PATH`), and their digests are part of the codegen fingerprint, so a toolkit
-update rebuilds the device crates. The option cannot be combined with
-`--materialize-cubin`, and, like it, does not support generic `#[cuda_module]`
-loading or `#[device] extern` declarations.
+assembled in parallel (at most one `ptxas` per core), about one to two minutes
+each for a large module. `ptxas` and `fatbinary` are found like `ptxas`
+everywhere else (`CUDA_OXIDE_PTXAS`, `CUDA_OXIDE_FATBINARY`, then the toolkit
+roots and `PATH`), and their digests are part of the codegen fingerprint, so a
+toolkit update rebuilds the device crates.
+
+The option is a default: an explicit `--emit-nvvm-ir` or `--materialize-cubin`
+builds that artifact instead, and interop device crates never get a fat
+binary. A crate whose device code the backend cannot assemble ahead of time
+(generic `#[cuda_module]` loading, `#[device] extern` declarations, or
+libdevice code that fell back to NVVM IR) fails with an error rather than
+silently shipping PTX only; set `CUDA_OXIDE_CUBIN_ARCHS=` (empty) to build it
+without cubins.
 
 Configuration values are defaults. Precedence is:
 

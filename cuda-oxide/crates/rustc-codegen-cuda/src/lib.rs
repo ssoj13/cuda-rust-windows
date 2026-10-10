@@ -646,7 +646,7 @@ impl CodegenBackend for CudaCodegenBackend {
                 )
                 .unwrap_or_else(|error| {
                     tcx.dcx().fatal(format!(
-                        "[rustc_codegen_cuda] Cannot materialize this device artifact: {error}"
+                        "[rustc_codegen_cuda] Cannot build a device image for this crate: {error}"
                     ))
                 });
 
@@ -934,9 +934,9 @@ fn write_device_artifact_object(
     );
     let mut spec = oxide_artifacts::ArtifactBundleSpec::new(&bundle_name, &result.target)
         .with_compile_options(compile_options);
-    // Loaders take the first loadable payload. The fat binary goes in the
-    // `Cubin` slot (a driver-loadable binary image), ahead of the PTX it was
-    // assembled from, so a driver that rejects it still has the PTX.
+    // Loaders prefer the `Cubin` payload (a driver-loadable binary image) and
+    // fall back to the PTX it was assembled from when the driver rejects it.
+    // The fat binary is also written first, for tools that read payload 0.
     let fatbin_name = format!("{bundle_name}.fatbin");
     if let Some(fatbin) = fatbin.as_ref() {
         spec = spec.with_payload(oxide_artifacts::ArtifactPayloadSpec::new(

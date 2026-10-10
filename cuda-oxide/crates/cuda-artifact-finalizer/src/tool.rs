@@ -140,7 +140,16 @@ impl PinnedTool {
     /// toolkit roots, then `PATH`. An explicit executable that fails
     /// validation is an error rather than a reason to keep searching.
     pub(crate) fn discover(spec: ToolSpec) -> Result<Self, FinalizerError> {
-        let (candidates, explicit) = tool_candidates(spec, |name| std::env::var_os(name));
+        Self::discover_with_env(spec, |name| std::env::var_os(name))
+    }
+
+    /// [`Self::discover`] over an explicit environment, so a parent process
+    /// can find the executable its child will find.
+    pub(crate) fn discover_with_env(
+        spec: ToolSpec,
+        get_env: impl FnMut(&str) -> Option<OsString>,
+    ) -> Result<Self, FinalizerError> {
+        let (candidates, explicit) = tool_candidates(spec, get_env);
         let mut tried = Vec::new();
         let mut first_error = None;
         for (index, path) in candidates.into_iter().enumerate() {
