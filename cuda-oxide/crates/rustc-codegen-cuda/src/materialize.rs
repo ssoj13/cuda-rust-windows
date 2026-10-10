@@ -13,10 +13,16 @@
 //! compilation. Setting the internal opt-in around raw Cargo is unsupported:
 //! Cargo can reuse an existing artifact without invoking this backend, and
 //! when the backend does run it rejects a missing handshake.
+//!
+//! The second build-time image is a fat binary (`CUDA_OXIDE_CUBIN_ARCHS`):
+//! the PTX that the default route already embeds is assembled with toolkit
+//! `ptxas` for each listed GPU generation and packed with `fatbinary`. It is
+//! embedded in front of the unchanged PTX payload, so a loader falls back to
+//! the PTX whenever the driver cannot use the fat binary.
 
 use cuda_artifact_finalizer::{
-    CudaArch, CudaArchParseError, DebugPolicy, FinalizationOptions, Finalizer, FinalizerError,
-    FinalizerOutput, KernelResourceUsage, NamedInput,
+    CudaArch, CudaArchParseError, DebugPolicy, FatbinBuilder, FatbinReport, FinalizationOptions,
+    Finalizer, FinalizerError, FinalizerOutput, KernelResourceUsage, NamedInput,
 };
 use thiserror::Error;
 
@@ -26,6 +32,7 @@ pub(crate) const EXPECTED_PROVENANCE_ENV: &str =
 pub(crate) const MATERIALIZER_HANDSHAKE_ENV: &str =
     reserved_oxide_symbols::MATERIALIZER_HANDSHAKE_ENV;
 pub(crate) const CODEGEN_FINGERPRINT_ENV: &str = reserved_oxide_symbols::CODEGEN_FINGERPRINT_ENV;
+pub(crate) const CUBIN_ARCHS_ENV: &str = reserved_oxide_symbols::CUBIN_ARCHS_ENV;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MaterializationRequest {
@@ -111,6 +118,25 @@ pub(crate) enum MaterializeError {
     )]
     CubinInput,
 
+    #[error("{CUBIN_ARCHS_ENV} is not valid Unicode")]
+    NonUnicodeCubinArchs,
+
+    #[error("{CUBIN_ARCHS_ENV} names an invalid architecture {value:?}: {source}")]
+    InvalidCubinArch {
+        value: String,
+        source: CudaArchParseError,
+    },
+
+    #[error(
+        "{MATERIALIZE_ENV} and {CUBIN_ARCHS_ENV} both select the embedded device image; use one of them"
+    )]
+    ConflictingDeviceImages,
+
+    #[error(
+        "{CUBIN_ARCHS_ENV} assembles cubins from PTX, but codegen produced {produced}; a fat binary needs the PTX route"
+    )]
+    FatbinNeedsPtx { produced: &'static str },
+
     #[error(transparent)]
     InvalidTarget(#[from] CudaArchParseError),
 
@@ -171,14 +197,41 @@ fn validate_tool_identity_handshake(
     Ok(())
 }
 
-/// Reject artifact-loading models the finalizer cannot reproduce, before any
-/// CUDA compiler library is discovered or loaded.
+/// Parse [`CUBIN_ARCHS_ENV`]: the architectures whose cubins are packed into a
+/// fat binary ahead of the PTX payload. Unset or blank means none.
+pub(crate) fn fatbin_targets_from_env() -> Result<Option<Vec<CudaArch>>, MaterializeError> {
+    match std::env::var(CUBIN_ARCHS_ENV) {
+        Ok(value) => parse_fatbin_targets(&value),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(MaterializeError::NonUnicodeCubinArchs),
+    }
+}
+
+fn parse_fatbin_targets(value: &str) -> Result<Option<Vec<CudaArch>>, MaterializeError> {
+    let targets = value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            name.parse::<CudaArch>()
+                .map_err(|source| MaterializeError::InvalidCubinArch {
+                    value: name.to_string(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((!targets.is_empty()).then_some(targets))
+}
+
+/// Reject artifact-loading models that a build-time device image (a
+/// materialized cubin or a fat binary) cannot reproduce, before any CUDA
+/// compiler library is discovered or loaded.
 pub(crate) fn validate_collection(
-    request: Option<MaterializationRequest>,
+    builds_device_image: bool,
     has_device_externs: bool,
     requires_ptx_bundle_merge: bool,
 ) -> Result<(), MaterializeError> {
-    if request.is_none() {
+    if !builds_device_image {
         return Ok(());
     }
     if requires_ptx_bundle_merge {
@@ -226,6 +279,22 @@ pub(crate) fn ltoir_to_cubin(
         bytes: report.image,
         resource_usage: report.resource_usage,
     })
+}
+
+/// Assemble the linked PTX for every requested architecture and pack the
+/// cubins into one fat binary. `target` is the architecture the PTX was
+/// generated for.
+pub(crate) fn ptx_to_fatbin(
+    ptx: &[u8],
+    module_name: &str,
+    target: &str,
+    targets: &[CudaArch],
+    allow_fma_contraction: bool,
+    debug_policy: DebugPolicy,
+) -> Result<FatbinReport, MaterializeError> {
+    let options = options(target, allow_fma_contraction, debug_policy)?;
+    let builder = FatbinBuilder::discover()?;
+    Ok(builder.build(NamedInput::new(module_name, ptx), &options, targets)?)
 }
 
 fn options(
@@ -386,20 +455,31 @@ mod tests {
 
     #[test]
     fn unsupported_collection_models_fail_without_tools() {
-        let handshake = test_handshake();
-        let request = Some(MaterializationRequest {
-            expected_provenance: handshake.provenance_sha256,
-            tool_identity_handshake: handshake,
-        });
         assert!(matches!(
-            validate_collection(request, false, true),
+            validate_collection(true, false, true),
             Err(MaterializeError::RequiresPtxBundleMerge)
         ));
         assert!(matches!(
-            validate_collection(request, true, false),
+            validate_collection(true, true, false),
             Err(MaterializeError::HasDeviceExterns)
         ));
-        assert!(validate_collection(None, true, true).is_ok());
+        assert!(validate_collection(false, true, true).is_ok());
+    }
+
+    #[test]
+    fn cubin_arch_list_is_comma_separated_and_strict() {
+        let targets = parse_fatbin_targets(" sm_75, sm_86 ,,sm_120 ")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            targets.iter().map(CudaArch::sm).collect::<Vec<_>>(),
+            ["sm_75", "sm_86", "sm_120"]
+        );
+        assert!(parse_fatbin_targets(" , ").unwrap().is_none());
+        assert!(matches!(
+            parse_fatbin_targets("sm_86,gfx90a"),
+            Err(MaterializeError::InvalidCubinArch { value, .. }) if value == "gfx90a"
+        ));
     }
 
     #[test]

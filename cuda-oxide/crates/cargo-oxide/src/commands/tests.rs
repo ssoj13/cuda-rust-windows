@@ -2317,6 +2317,57 @@ fn inspect_oxide_config_rejects_bad_toml_and_arch() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// `cubin-archs` becomes `[env] CUDA_OXIDE_CUBIN_ARCHS` in `sm_XX` spelling,
+/// rejects an unknown architecture, and may not be set twice.
+#[test]
+fn cubin_archs_config_becomes_the_backend_env() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "cargo_oxide_config_cubin_archs_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    let cargo_dir = root.join(".cargo");
+    std::fs::create_dir_all(&cargo_dir).unwrap();
+    let config = cargo_dir.join("cuda-oxide.toml");
+
+    std::fs::write(&config, "cubin-archs = [\"sm_75\", \"86\", \"sm_120\"]\n").unwrap();
+    match inspect_oxide_config(&root) {
+        OxideConfigInspection::Valid { config, .. } => assert_eq!(
+            config.env,
+            [(
+                CUBIN_ARCHS_ENV.to_string(),
+                "sm_75,sm_86,sm_120".to_string()
+            )]
+        ),
+        other => panic!("expected Valid, got {other:?}"),
+    }
+
+    std::fs::write(&config, "cubin-archs = [\"sm_75\", \"sm_9x\"]\n").unwrap();
+    match inspect_oxide_config(&root) {
+        OxideConfigInspection::Invalid { errors, .. } => {
+            assert!(errors.iter().any(|e| e.contains("cubin-archs")));
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+
+    std::fs::write(
+        &config,
+        "cubin-archs = [\"sm_86\"]\n[env]\nCUDA_OXIDE_CUBIN_ARCHS = \"sm_89\"\n",
+    )
+    .unwrap();
+    match inspect_oxide_config(&root) {
+        OxideConfigInspection::Invalid { errors, .. } => {
+            assert!(errors.iter().any(|e| e.contains("sets both")));
+        }
+        other => panic!("expected Invalid, got {other:?}"),
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// `default-arch` load-time validation must be exactly as permissive as
 /// the consumers: `parse_nvvm_arch` (NVVM path) accepts `sm_XX`,
 /// `compute_XX`, and bare `XX`, so none of those may fail the load.

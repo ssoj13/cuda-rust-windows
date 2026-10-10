@@ -113,6 +113,15 @@ pub(super) fn passthrough_codegen_fingerprint_with_env(
             owner_filter.as_bytes().to_vec(),
         );
     }
+    // A fat binary embeds ptxas output, so the assembler and packer are
+    // codegen inputs too: a toolkit update must rebuild the device crates.
+    if effective_env.get(CUBIN_ARCHS_ENV).is_some_and(|value| {
+        value
+            .iter()
+            .any(|byte| !byte.is_ascii_whitespace() && *byte != b',')
+    }) {
+        effective_env.insert(FATBIN_TOOLS_KEY.to_string(), fatbin_tool_digest().to_vec());
+    }
 
     // SHA-256 over length-delimited key/value pairs. The complete digest is
     // tracked by device-owning procedural macros, so settings are neither
@@ -123,6 +132,22 @@ pub(super) fn passthrough_codegen_fingerprint_with_env(
         update_codegen_fingerprint_hash(&mut hash, &value);
     }
     finish_codegen_fingerprint(hash)
+}
+
+/// Fingerprint-only key; never exported to the child environment.
+const FATBIN_TOOLS_KEY: &str = "CUDA_OXIDE_INTERNAL_FATBIN_TOOLS";
+
+/// Digest of the `ptxas` and `fatbinary` the backend will discover (same
+/// finalizer discovery), computed once per process. Missing tools hash as a
+/// marker: the backend then fails the build with the discovery error.
+fn fatbin_tool_digest() -> [u8; 32] {
+    static DIGEST: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *DIGEST.get_or_init(|| {
+        cuda_artifact_finalizer::FatbinBuilder::discover()
+            .ok()
+            .and_then(|builder| builder.tool_digest())
+            .unwrap_or([0; 32])
+    })
 }
 
 fn update_codegen_fingerprint_hash(hash: &mut sha2::Sha256, bytes: &[u8]) {

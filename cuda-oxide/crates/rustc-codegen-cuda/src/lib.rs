@@ -330,6 +330,7 @@ mod device_codegen;
 mod generated_intrinsics;
 mod materialize;
 
+use cuda_artifact_finalizer::KernelResourceUsage;
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CompiledModule, CompiledModules, CrateInfo, ModuleKind};
 use rustc_metadata::EncodedMetadata;
@@ -615,6 +616,18 @@ impl CodegenBackend for CudaCodegenBackend {
                             "[rustc_codegen_cuda] Invalid cubin materialization request: {error}"
                         ))
                     });
+                let fatbin_targets = materialize::fatbin_targets_from_env()
+                    .and_then(|targets| match (&materialization_request, targets) {
+                        (Some(_), Some(_)) => {
+                            Err(materialize::MaterializeError::ConflictingDeviceImages)
+                        }
+                        (_, targets) => Ok(targets),
+                    })
+                    .unwrap_or_else(|error| {
+                        tcx.dcx().fatal(format!(
+                            "[rustc_codegen_cuda] Invalid fat binary request: {error}"
+                        ))
+                    });
                 if self.config.verbose {
                     eprintln!("[rustc_codegen_cuda] Compiling device code via cuda-oxide...");
                 }
@@ -627,7 +640,7 @@ impl CodegenBackend for CudaCodegenBackend {
                 );
 
                 materialize::validate_collection(
-                    materialization_request,
+                    materialization_request.is_some() || fatbin_targets.is_some(),
                     !collection_result.device_externs.is_empty(),
                     collection_result.requires_ptx_bundle_merge,
                 )
@@ -751,6 +764,7 @@ impl CodegenBackend for CudaCodegenBackend {
                                 device_functions,
                                 self.config.device_codegen_crates.is_some(),
                                 materialization_request,
+                                fatbin_targets.as_deref(),
                             ) {
                                 Ok(path) => {
                                     if self.config.verbose {
@@ -861,6 +875,7 @@ fn write_device_artifact_object(
     functions: &[collector::CollectedFunction<'_>],
     use_target_specific_anchor: bool,
     materialization_request: Option<materialize::MaterializationRequest>,
+    fatbin_targets: Option<&[cuda_artifact_finalizer::CudaArch]>,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let bundle_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| output_name.to_string());
     let materialized_artifact = materialize_artifact_for_embedding(
@@ -870,7 +885,21 @@ fn write_device_artifact_object(
         artifact,
     )?;
     if let Some(materialized) = materialized_artifact.as_ref() {
-        emit_launch_bounds_spill_warnings(tcx, result, functions, &materialized.resource_usage);
+        emit_launch_bounds_spill_warnings(
+            tcx,
+            result,
+            functions,
+            &[(None, materialized.resource_usage.as_slice())],
+        );
+    }
+    let fatbin = fatbin_for_embedding(fatbin_targets, result, artifact)?;
+    if let Some(fatbin) = fatbin.as_ref() {
+        let reports = fatbin
+            .resource_usage
+            .iter()
+            .map(|(target, usage)| (Some(target.sm()), usage.as_slice()))
+            .collect::<Vec<_>>();
+        emit_launch_bounds_spill_warnings(tcx, result, functions, &reports);
     }
     let (artifact, was_materialized) = match materialized_artifact.as_ref() {
         Some(materialized) => (&materialized.artifact, true),
@@ -892,6 +921,7 @@ fn write_device_artifact_object(
     // and diagnostics must not mistake `--no-fmad` materialization for a
     // default-policy artifact merely because no compilation remains to do.
     let carries_compile_policy = was_materialized
+        || fatbin.is_some()
         || matches!(
             artifact.kind,
             device_codegen::DeviceCodegenArtifactKind::NvvmIr
@@ -903,12 +933,23 @@ fn write_device_artifact_object(
         carries_compile_policy,
     );
     let mut spec = oxide_artifacts::ArtifactBundleSpec::new(&bundle_name, &result.target)
-        .with_compile_options(compile_options)
-        .with_payload(oxide_artifacts::ArtifactPayloadSpec::new(
-            payload_kind,
-            &artifact.name,
-            &artifact.bytes,
+        .with_compile_options(compile_options);
+    // Loaders take the first loadable payload. The fat binary goes in the
+    // `Cubin` slot (a driver-loadable binary image), ahead of the PTX it was
+    // assembled from, so a driver that rejects it still has the PTX.
+    let fatbin_name = format!("{bundle_name}.fatbin");
+    if let Some(fatbin) = fatbin.as_ref() {
+        spec = spec.with_payload(oxide_artifacts::ArtifactPayloadSpec::new(
+            oxide_artifacts::ArtifactPayloadKind::Cubin,
+            &fatbin_name,
+            &fatbin.image,
         ));
+    }
+    spec = spec.with_payload(oxide_artifacts::ArtifactPayloadSpec::new(
+        payload_kind,
+        &artifact.name,
+        &artifact.bytes,
+    ));
     for function in functions {
         let kind = if function.is_kernel {
             oxide_artifacts::ArtifactEntryKind::Kernel
@@ -1004,13 +1045,7 @@ fn materialize_artifact_for_embedding(
     let Some(request) = request else {
         return Ok(None);
     };
-    let debug_policy = match result.debug_kind {
-        llvm_export::export::DebugKind::Off => cuda_artifact_finalizer::DebugPolicy::None,
-        llvm_export::export::DebugKind::LineTables => {
-            cuda_artifact_finalizer::DebugPolicy::LineTables
-        }
-        llvm_export::export::DebugKind::Full => cuda_artifact_finalizer::DebugPolicy::Full,
-    };
+    let debug_policy = finalizer_debug_policy(result.debug_kind);
     let cubin = match artifact.kind {
         device_codegen::DeviceCodegenArtifactKind::NvvmIr => materialize::nvvm_ir_to_cubin(
             request,
@@ -1045,8 +1080,58 @@ fn materialize_artifact_for_embedding(
     }))
 }
 
+/// Opt-in (`CUDA_OXIDE_CUBIN_ARCHS`): assemble the linked PTX into a fat
+/// binary of cubins for the listed GPU generations, embedded ahead of the PTX
+/// so supported GPUs skip the load-time JIT. Codegen that fell back to NVVM IR
+/// (libdevice without a matching `llvm-link`) has no PTX to assemble and fails
+/// rather than silently embedding no fat binary.
+fn fatbin_for_embedding(
+    targets: Option<&[cuda_artifact_finalizer::CudaArch]>,
+    result: &device_codegen::DeviceCodegenResult,
+    artifact: &device_codegen::DeviceCodegenArtifact,
+) -> Result<Option<cuda_artifact_finalizer::FatbinReport>, Box<dyn std::error::Error>> {
+    let Some(targets) = targets else {
+        return Ok(None);
+    };
+    let produced = match artifact.kind {
+        device_codegen::DeviceCodegenArtifactKind::Ptx => None,
+        device_codegen::DeviceCodegenArtifactKind::NvvmIr => Some("NVVM IR"),
+        device_codegen::DeviceCodegenArtifactKind::Ltoir => Some("LTOIR"),
+        device_codegen::DeviceCodegenArtifactKind::Cubin => Some("a cubin"),
+    };
+    if let Some(produced) = produced {
+        return Err(Box::new(materialize::MaterializeError::FatbinNeedsPtx {
+            produced,
+        }));
+    }
+    Ok(Some(materialize::ptx_to_fatbin(
+        &artifact.bytes,
+        &artifact.name,
+        &result.target,
+        targets,
+        result.allow_fma_contraction,
+        finalizer_debug_policy(result.debug_kind),
+    )?))
+}
+
+fn finalizer_debug_policy(
+    debug_kind: llvm_export::export::DebugKind,
+) -> cuda_artifact_finalizer::DebugPolicy {
+    match debug_kind {
+        llvm_export::export::DebugKind::Off => cuda_artifact_finalizer::DebugPolicy::None,
+        llvm_export::export::DebugKind::LineTables => {
+            cuda_artifact_finalizer::DebugPolicy::LineTables
+        }
+        llvm_export::export::DebugKind::Full => cuda_artifact_finalizer::DebugPolicy::Full,
+    }
+}
+
 /// Warns on every `#[launch_bounds]` kernel whose ptxas resource report
 /// shows register spills, at the kernel's definition span.
+///
+/// `reports` holds one ptxas report per compiled cubin, labelled with its
+/// architecture when there is more than one (a fat binary). A kernel gets a
+/// single warning with a note for every architecture on which it spills.
 ///
 /// Set `CUDA_OXIDE_NO_SPILL_WARN=1` to silence the warnings. They are raw
 /// span diagnostics, not lints, so `#[allow]` cannot suppress them; the
@@ -1055,18 +1140,33 @@ fn emit_launch_bounds_spill_warnings(
     tcx: TyCtxt<'_>,
     result: &device_codegen::DeviceCodegenResult,
     functions: &[collector::CollectedFunction<'_>],
-    resource_usage: &[cuda_artifact_finalizer::KernelResourceUsage],
+    reports: &[(Option<String>, &[KernelResourceUsage])],
 ) {
     if std::env::var_os("CUDA_OXIDE_NO_SPILL_WARN").is_some() {
         return;
     }
-    for usage in resource_usage.iter().filter(|usage| usage.has_spills()) {
-        let Some(bounds) = result.kernel_launch_bounds.get(&usage.kernel) else {
+    // Spilling kernels in first-report order, each with (arch, usage) per report.
+    type ArchUsage<'a> = (Option<&'a str>, &'a KernelResourceUsage);
+    let mut spills: Vec<(&str, Vec<ArchUsage<'_>>)> = Vec::new();
+    for (arch, usages) in reports {
+        for usage in usages.iter().filter(|usage| usage.has_spills()) {
+            let entry = (arch.as_deref(), usage);
+            match spills
+                .iter_mut()
+                .find(|(kernel, _)| *kernel == usage.kernel)
+            {
+                Some((_, kernel_spills)) => kernel_spills.push(entry),
+                None => spills.push((usage.kernel.as_str(), vec![entry])),
+            }
+        }
+    }
+    for (kernel, kernel_spills) in spills {
+        let Some(bounds) = result.kernel_launch_bounds.get(kernel) else {
             continue;
         };
         let Some(function) = functions
             .iter()
-            .find(|function| function.is_kernel && function.export_name == usage.kernel)
+            .find(|function| function.is_kernel && function.export_name == kernel)
         else {
             continue;
         };
@@ -1079,17 +1179,19 @@ fn emit_launch_bounds_spill_warnings(
         };
         let mut diagnostic = tcx.dcx().struct_span_warn(
             tcx.def_span(function.instance.def_id()),
-            format!(
-                "kernel `{}` compiled with `{launch_bounds}` and spills registers",
-                usage.kernel
-            ),
+            format!("kernel `{kernel}` compiled with `{launch_bounds}` and spills registers"),
         );
-        diagnostic.note(format!(
-            "ptxas reports {} bytes spill stores and {} bytes spill loads",
-            usage.spill_store_bytes, usage.spill_load_bytes
-        ));
-        if let Some(registers) = usage.registers {
-            diagnostic.note(format!("ptxas allocated {registers} registers per thread"));
+        for (arch, usage) in kernel_spills {
+            let on = arch.map(|arch| format!(" for {arch}")).unwrap_or_default();
+            diagnostic.note(format!(
+                "ptxas reports {} bytes spill stores and {} bytes spill loads{on}",
+                usage.spill_store_bytes, usage.spill_load_bytes
+            ));
+            if let Some(registers) = usage.registers {
+                diagnostic.note(format!(
+                    "ptxas allocated {registers} registers per thread{on}"
+                ));
+            }
         }
         if bounds.min_blocks.is_some() {
             diagnostic.help("relax `min_blocks_per_sm` or reduce register pressure");

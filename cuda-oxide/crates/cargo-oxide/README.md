@@ -466,6 +466,28 @@ Relative backend paths are resolved from the `.cargo` directory containing the
 config file. Each `extra-rustflags` array element remains one rustc argument,
 including values that contain spaces.
 
+### Ahead-of-time cubins
+
+`cubin-archs = ["sm_75", "sm_86", "sm_89", "sm_120"]` (or the environment
+variable `CUDA_OXIDE_CUBIN_ARCHS=sm_75,sm_86,...`, which takes precedence)
+makes the backend assemble the linked PTX with toolkit `ptxas` once per listed
+architecture and pack the cubins into one compressed fat binary with
+`fatbinary`. The bundle then holds the fat binary in its `Cubin` slot, ahead of
+the unchanged PTX. A supported GPU loads its cubin directly and skips the
+load-time JIT; a driver that cannot read the fat binary, or a GPU it has no
+cubin for, loads the PTX as before. The machine code is what the driver would
+JIT from that PTX, so results do not change.
+
+Every listed architecture must be at least the PTX target (`--arch` /
+`default-arch`); build the PTX for the oldest GPU you support. Cubins are
+assembled in parallel, about one to two minutes each for a large module.
+`ptxas` and `fatbinary` are found like `ptxas` everywhere else
+(`CUDA_OXIDE_PTXAS`, `CUDA_OXIDE_FATBINARY`, then the toolkit roots and
+`PATH`), and their digests are part of the codegen fingerprint, so a toolkit
+update rebuilds the device crates. The option cannot be combined with
+`--materialize-cubin`, and, like it, does not support generic `#[cuda_module]`
+loading or `#[device] extern` declarations.
+
 Configuration values are defaults. Precedence is:
 
 1. explicit `cargo oxide` flags and internal artifact paths;

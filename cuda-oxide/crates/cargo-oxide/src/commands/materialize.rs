@@ -16,6 +16,7 @@ pub(super) const MATERIALIZER_HANDSHAKE_ENV: &str =
     reserved_oxide_symbols::MATERIALIZER_HANDSHAKE_ENV;
 pub(super) const CODEGEN_FINGERPRINT_ENV: &str = reserved_oxide_symbols::CODEGEN_FINGERPRINT_ENV;
 pub(super) const DEVICE_CODEGEN_CRATE_ENV: &str = reserved_oxide_symbols::DEVICE_CODEGEN_CRATE_ENV;
+pub(super) const CUBIN_ARCHS_ENV: &str = reserved_oxide_symbols::CUBIN_ARCHS_ENV;
 pub(super) const BACKEND_IDENTITY_CFG: &str = "cuda_oxide_internal_backend_identity";
 pub(super) const LEGACY_CODEGEN_FINGERPRINT_CFG: &str = "cuda_oxide_internal_codegen_env";
 pub(super) const LEGACY_MATERIALIZER_PROVENANCE_CFG: &str =
