@@ -616,4 +616,10 @@ fn test_mir_func_inline_intent_verify() {
     let plain = make_func(&mut ctx, false);
     assert_eq!(plain.inline_intent(&ctx), Ok(None));
     assert!(plain.verify(&ctx).is_ok());
+
+    let plain_kernel = make_func(&mut ctx, true);
+    assert!(
+        plain_kernel.verify(&ctx).is_ok(),
+        "a kernel without an intent is valid"
+    );
 }

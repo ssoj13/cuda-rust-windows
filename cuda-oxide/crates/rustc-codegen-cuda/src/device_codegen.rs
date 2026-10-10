@@ -849,6 +849,23 @@ impl From<std::io::Error> for DeviceCodegenError {
     }
 }
 
+/// Whether this `#[inline(never)]` is the one `#[device]` puts on the prefixed
+/// function of a device function with its own type or const parameters
+/// (cuda-macros `generate_device_function`, `has_codegen_generics`). It keeps
+/// each monomorphization a separate item for the collector, a host-side
+/// requirement rather than a device-code intent; as `noinline` it would keep
+/// every call and stop const-generic arguments from folding into their callers.
+/// The macro's attribute comes first, so rustc keeps it and reports an inline
+/// attribute the user adds there as unused: on such functions a user's own
+/// inline attribute never reached device code, before or after this mapping.
+/// Closures and other unnamed instances are never a match (`opt_item_name`).
+fn is_generic_device_collector_boundary<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> bool {
+    let def_id = instance.def_id();
+    tcx.generics_of(def_id).own_requires_monomorphization()
+        && tcx
+            .opt_item_name(def_id)
+            .is_some_and(|name| reserved_oxide_symbols::is_device_symbol(name.as_str()))
+}
 /// Generates PTX for device functions using the cuda-oxide pipeline.
 ///
 /// This is the main entry point for device codegen. It bridges between
@@ -886,19 +903,6 @@ impl From<std::io::Error> for DeviceCodegenError {
 ///                     │
 ///                     └──▶ PTX (.ptx) via `llc`
 /// ```
-/// Whether this `#[inline(never)]` is the one `#[device]` puts on the prefixed
-/// function of a *generic* device function (cuda-macros
-/// `generate_device_function`). It keeps each monomorphization a separate item
-/// for the collector, a host-side requirement rather than a device-code intent;
-/// as `noinline` it would keep every call and stop const-generic arguments from
-/// folding into their callers. The macro's attribute precedes the user's, so
-/// rustc already reports any inline attribute the user adds there as unused and
-/// no user intent is dropped here.
-fn is_generic_device_collector_boundary<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> bool {
-    !instance.args.is_empty()
-        && reserved_oxide_symbols::is_device_symbol(tcx.item_name(instance.def_id()).as_str())
-}
-
 pub fn generate_device_code<'tcx>(
     tcx: TyCtxt<'tcx>,
     functions: &[CollectedFunction<'tcx>],
