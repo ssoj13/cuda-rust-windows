@@ -30,7 +30,12 @@ mod kernels {
         if let Some(slot) = out.get_mut(idx) {
             let v = x[i];
             let (s, c) = sin_cos(v);
-            *slot = [v.sin().to_bits(), v.cos().to_bits(), s.to_bits(), c.to_bits()];
+            *slot = [
+                v.sin().to_bits(),
+                v.cos().to_bits(),
+                s.to_bits(),
+                c.to_bits(),
+            ];
         }
     }
 }
