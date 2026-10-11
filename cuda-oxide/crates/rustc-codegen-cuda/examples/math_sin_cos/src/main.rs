@@ -8,7 +8,8 @@
 //! The kernel evaluates `x.sin()`, `x.cos()` (libdevice `__nv_sinf` / `__nv_cosf`)
 //! and `sin_cos(x)` for 2^24 arguments: log-spaced magnitudes from 2^-40 up to
 //! just below `SIN_COS_MAX_ARG`, both signs, plus the zeros. Every result must
-//! carry the same bits, including the sign of zero.
+//! carry the same bits, including the sign of zero, and the host's own
+//! `sin_cos` (plain Rust, no device intrinsic) must agree with the device's.
 //!
 //! Run with:
 //!   cargo oxide run math_sin_cos
@@ -81,18 +82,23 @@ fn main() {
 
     let mut mismatches = 0usize;
     for (v, [sin, cos, s, c]) in x.iter().zip(&out) {
-        if sin != s || cos != c {
+        let (hs, hc) = sin_cos(*v);
+        if sin != s || cos != c || hs.to_bits() != *s || hc.to_bits() != *c {
             if mismatches < 8 {
                 eprintln!(
-                    "  x = {v:e} ({:#010x}): sin {sin:#010x} vs {s:#010x}, cos {cos:#010x} vs {c:#010x}",
-                    v.to_bits()
+                    "  x = {v:e} ({:#010x}): sin {sin:#010x} vs {s:#010x} (host {:#010x}), cos {cos:#010x} vs {c:#010x} (host {:#010x})",
+                    v.to_bits(),
+                    hs.to_bits(),
+                    hc.to_bits()
                 );
             }
             mismatches += 1;
         }
     }
     if mismatches == 0 {
-        println!("SUCCESS: {N} arguments, sin_cos matches libdevice bit for bit");
+        println!(
+            "SUCCESS: {N} arguments, sin_cos matches libdevice bit for bit on device and host"
+        );
     } else {
         println!("FAILED: {mismatches} of {N} arguments differ");
         std::process::exit(1);

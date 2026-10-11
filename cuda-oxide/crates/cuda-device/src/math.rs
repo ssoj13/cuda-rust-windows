@@ -15,8 +15,11 @@
 //! [`sin_cos`] is the first path alone: the same constants, the same
 //! correctly-rounded operations in the same order, hence the same bits as
 //! libdevice for every argument it accepts. One reduction serves both results.
+//! It is plain Rust (`core` float math), so host code, such as a CPU twin of a
+//! device function, computes the same bits instead of hitting a device-only
+//! intrinsic.
 
-use crate::float::{add_rn_f32, fma_rn_f32, mul_rn_f32};
+use core::f32::math::{mul_add, round_ties_even};
 
 /// `2/pi`, rounded (libdevice `0x3F22F983`).
 const TWO_OVER_PI: f32 = f32::from_bits(0x3F22_F983);
@@ -24,9 +27,6 @@ const TWO_OVER_PI: f32 = f32::from_bits(0x3F22_F983);
 const NEG_PI_2_HI: f32 = f32::from_bits(0xBFC9_0FDA);
 const NEG_PI_2_MID: f32 = f32::from_bits(0xB3A2_2168);
 const NEG_PI_2_LO: f32 = f32::from_bits(0xA7C2_34C5);
-/// `1.5 * 2^23`: adding it rounds an `f32` below `2^22` in magnitude to the nearest
-/// integer (ties to even) and leaves that integer in the low mantissa bits.
-const ROUNDING_SHIFTER: f32 = f32::from_bits(0x4B40_0000);
 /// Largest argument magnitude the Cody-Waite path covers (libdevice switches at it).
 pub const SIN_COS_MAX_ARG: f32 = 105_615.0;
 
@@ -37,16 +37,21 @@ pub const SIN_COS_MAX_ARG: f32 = 105_615.0;
 /// turns of rotation or a sampled `2 * pi * u` satisfies it. Beyond it the
 /// reduction is not exact and accuracy degrades with `|x|` instead of switching
 /// to the Payne-Hanek path. NaN maps to NaN.
+///
+/// Every step is a single correctly-rounded operation that the backend cannot
+/// fuse differently from libdevice: the product `x * 2/pi` feeds a rounding,
+/// not an addition, and every multiply-add is an explicit `mul_add`.
 #[inline(always)]
 pub fn sin_cos(x: f32) -> (f32, f32) {
-    // q = round(x * 2/pi): libdevice uses cvt.rni; the shifter gives the same
-    // integer for |x * 2/pi| < 2^22, and its low bits are the quadrant.
-    let shifted = add_rn_f32(mul_rn_f32(x, TWO_OVER_PI), ROUNDING_SHIFTER);
-    let q = add_rn_f32(shifted, -ROUNDING_SHIFTER);
-    let quadrant = shifted.to_bits();
-    let t = fma_rn_f32(q, NEG_PI_2_HI, x);
-    let t = fma_rn_f32(q, NEG_PI_2_MID, t);
-    let t = fma_rn_f32(q, NEG_PI_2_LO, t);
+    // libdevice: an integer q = cvt.rni(x * 2/pi) (ties to even), converted back to
+    // f32. The round trip through i32 matters: it turns -0 into +0, which keeps the
+    // sign of a zero x in t. |q| < 2^17 here, so both conversions are exact.
+    let quadrant = round_ties_even(x * TWO_OVER_PI) as i32;
+    let q = quadrant as f32;
+    let t = mul_add(q, NEG_PI_2_HI, x);
+    let t = mul_add(q, NEG_PI_2_MID, t);
+    let t = mul_add(q, NEG_PI_2_LO, t);
+    let quadrant = quadrant as u32;
     (
         sin_reduced(t, quadrant),
         sin_reduced(t, quadrant.wrapping_add(1)),
@@ -58,29 +63,33 @@ pub fn sin_cos(x: f32) -> (f32, f32) {
 /// quadrant's low bit, negated when its second bit is set.
 #[inline(always)]
 fn sin_reduced(t: f32, quadrant: u32) -> f32 {
-    let s = mul_rn_f32(t, t);
+    let s = t * t;
     let cosine = quadrant & 1 != 0;
     let lead = if cosine { 1.0 } else { t };
-    let lead_s = fma_rn_f32(s, lead, 0.0);
+    let lead_s = mul_add(s, lead, 0.0);
     let p = if cosine {
-        fma_rn_f32(f32::from_bits(0x37CB_AC00), s, f32::from_bits(0xBAB6_07ED))
+        mul_add(
+            f32::from_bits(0x37CB_AC00),
+            s,
+            f32::from_bits(0xBAB6_07ED),
+        )
     } else {
         f32::from_bits(0xB94D_4153)
     };
-    let p = fma_rn_f32(
+    let p = mul_add(
         p,
         s,
         f32::from_bits(if cosine { 0x3D2A_AABB } else { 0x3C08_85E4 }),
     );
-    let p = fma_rn_f32(
+    let p = mul_add(
         p,
         s,
         f32::from_bits(if cosine { 0xBEFF_FFFF } else { 0xBE2A_AAA8 }),
     );
-    let r = fma_rn_f32(p, lead_s, lead);
+    let r = mul_add(p, lead_s, lead);
     // libdevice negates with fma(r, -1, 0), which keeps +0 for r = +0.
     if quadrant & 2 != 0 {
-        fma_rn_f32(r, -1.0, 0.0)
+        mul_add(r, -1.0, 0.0)
     } else {
         r
     }

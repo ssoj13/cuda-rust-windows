@@ -4,6 +4,7 @@
  */
 
 #![feature(f16)]
+#![feature(core_float_math)]
 #![no_std]
 
 // Proc-macro expansions use the public crate path so the same expansion works
