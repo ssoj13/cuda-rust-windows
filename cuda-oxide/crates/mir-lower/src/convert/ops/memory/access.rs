@@ -10,6 +10,7 @@ use super::common::{
     pointer_proved_alignment, value_abi_align, value_mir_type,
 };
 use super::debug::copy_debug_local_variable;
+use crate::convert::ops::stack_slot::entry_alloca;
 use crate::convert::target_stable_storage::coerce_target_stable_value;
 use crate::convert::types::{convert_type, mir_type_abi_align};
 use crate::packed_shared_local_storage::carrier_storage_type;
@@ -223,6 +224,9 @@ pub(crate) fn convert_alloca(
 /// addresses, so we must place the value in memory to obtain a pointer.
 /// This applies to all types: scalars (e.g. `&factor` where factor is `u32`),
 /// aggregates (e.g. `&closure_env`), and pointers (e.g. `&&T`).
+///
+/// The slot is a static entry-block alloca (see [`entry_alloca`]); only the
+/// store stays at the reference site.
 pub(crate) fn convert_ref(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -233,23 +237,7 @@ pub(crate) fn convert_ref(
     let operand_ty = operand.get_type(ctx);
     let abi_align = value_abi_align(ctx, operands_info, operand);
 
-    let i32_ty = IntegerType::get(ctx, 32, Signedness::Signless);
-    let one_apint =
-        pliron::utils::apint::APInt::from_i64(1, std::num::NonZeroUsize::new(32).unwrap());
-    let one_attr = pliron::builtin::attributes::IntegerAttr::new(i32_ty, one_apint);
-    let one_const = llvm::ConstantOp::new(ctx, Box::new(one_attr));
-    rewriter.insert_operation(ctx, one_const.get_operation());
-    let one_val = one_const.get_operation().deref(ctx).get_result(0);
-
-    let alloca = llvm::AllocaOp::new(ctx, operand_ty, one_val, 0);
-    // Honour the referent's repr(align(N)) ABI alignment. Without this, the
-    // synthesised alloca would be under-aligned relative to any loads/stores
-    // that claim the struct's true alignment.
-    if let Some(align) = abi_align {
-        llvm_export::ops::set_op_alignment(ctx, alloca.get_operation(), align as u32);
-    }
-    rewriter.insert_operation(ctx, alloca.get_operation());
-    let alloca_ptr = alloca.get_operation().deref(ctx).get_result(0);
+    let alloca_ptr = entry_alloca(ctx, rewriter, operand_ty, abi_align);
 
     let store = llvm::StoreOp::new(ctx, operand, alloca_ptr);
     if let Some(align) = abi_align {

@@ -924,19 +924,6 @@ fn emit_int_to_ptr(
     }
 }
 
-fn const_i64(
-    ctx: &mut Context,
-    rewriter: &mut DialectConversionRewriter,
-    n: i64,
-) -> pliron::value::Value {
-    let i64_ty = IntegerType::get(ctx, 64, Signedness::Signless);
-    let apint = pliron::utils::apint::APInt::from_i64(n, std::num::NonZeroUsize::new(64).unwrap());
-    let attr = pliron::builtin::attributes::IntegerAttr::new(i64_ty, apint);
-    let c = llvm::ConstantOp::new(ctx, Box::new(attr));
-    rewriter.insert_operation(ctx, c.get_operation());
-    c.get_operation().deref(ctx).get_result(0)
-}
-
 /// Equal-size Transmute through memory: `alloca` a stack slot, `store` the
 /// source value into it, then `load` it back as the destination type.
 ///
@@ -1038,11 +1025,12 @@ fn emit_transmute_via_memory(
     };
     let storage_ty = if source_is_i1 { byte_ty } else { val_ty };
 
-    let one = const_i64(ctx, rewriter, 1);
-    let alloca = llvm::AllocaOp::new(ctx, storage_ty, one, 0);
-    llvm_export::ops::set_op_alignment(ctx, alloca.get_operation(), align);
-    rewriter.insert_operation(ctx, alloca.get_operation());
-    let ptr = alloca.get_operation().deref(ctx).get_result(0);
+    let ptr = crate::convert::ops::stack_slot::entry_alloca(
+        ctx,
+        rewriter,
+        storage_ty,
+        Some(u64::from(align)),
+    );
 
     let store = llvm::StoreOp::new(ctx, stored_value, ptr);
     llvm_export::ops::set_op_alignment(ctx, store.get_operation(), align);

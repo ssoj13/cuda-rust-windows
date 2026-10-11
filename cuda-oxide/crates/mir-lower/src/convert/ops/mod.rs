@@ -38,6 +38,7 @@ pub mod cast;
 pub mod constants;
 pub mod control_flow;
 pub mod memory;
+pub(crate) mod stack_slot;
 
 #[cfg(test)]
 pub(crate) mod test_util;

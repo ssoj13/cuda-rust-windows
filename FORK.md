@@ -142,6 +142,30 @@ from upstream:
 
 ## Current Divergence Log
 
+## 2026-10-10 - Lowering temporaries in the entry block; local-memory-free sin_cos
+
+- Branch: `perf/entry-block-allocas`, merged into `main` of `ssoj13/cuda-rust-windows`.
+- Upstream baseline: fork `main` 158229b5b.
+- Files/area: `mir-lower` (`convert/ops/stack_slot.rs`: `entry_alloca`, used by `mir.ref`,
+  enum payload reads, runtime-indexed array reads and transmutes), `cuda-device`
+  (`math::sin_cos`, `#![feature(core_float_math)]`), example `math_sin_cos`.
+- Intentional divergence: every stack slot the lowering needs is a static alloca at the start
+  of the function's entry block; only its store and loads stay at the use site. Created at the
+  use site (inside a loop), the slot survived SROA (entry-block allocas only), NVPTX hoisted it
+  into the local frame and every access became a local load or store. WarpBro, sm_86: fast_*
+  frames 456 -> 144-200 bytes, full_* 2248 -> 1632, the per-march-step `Option<Hit>` round trip
+  through local memory gone. `cuda_device::math::sin_cos` is libdevice `__nv_sinf/__nv_cosf`'s
+  Cody-Waite path alone (|x| < 105615), in plain `core` float math: bit-identical to libdevice
+  on 2^24 arguments, on device and host, without the Payne-Hanek table in local memory.
+- Linux impact: lowering only moves allocas; same IR semantics. Linux `clippy`, `test`,
+  `test-cuda`, `check-guards` pass; the full Linux smoketest did not complete (WSL ran out of
+  disk) and is pending. `check-intrinsics` fails on the probe's recorded nightly-vs-stable llc
+  version, independent of this change.
+- Windows validation: mir-lower (incl. `slot_of_a_later_block_is_allocated_in_the_entry_block`),
+  llvm-export, mir-importer, dialect-mir, cuda-device clippy and tests; `math_sin_cos` on an
+  RTX 3080 Ti; WarpBro builds and its kernels measured with `bootstrap.py k`.
+- Follow-up: rerun the Linux smoketest; offer upstream with the constant-memory fix.
+
 ## 2026-10-10 - Ahead-of-time cubins in a fat binary
 
 - Branch: `feat/fatbin-archs`, merged into `main` of `ssoj13/cuda-rust-windows`.
