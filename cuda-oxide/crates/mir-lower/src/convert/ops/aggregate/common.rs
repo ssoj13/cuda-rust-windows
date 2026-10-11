@@ -30,11 +30,10 @@ pub(super) fn anyhow_to_pliron(e: anyhow::Error) -> pliron::result::Error {
 /// type alone can look under-aligned: `{ i8, [7 x i8] }` says "align 1"
 /// to LLVM, while Rust may require 8.
 ///
-/// The alloca lands at the use site, same as
-/// [`convert_extract_array_element`](super::array_extract::convert_extract_array_element);
-/// the standard `opt -O2` run (SROA)
-/// removes it again. Hoisting these into the function's entry block is a
-/// known follow-up for the unoptimized (`CUDA_OXIDE_NO_OPT=1`) path.
+/// The slot is a static entry-block alloca
+/// ([`entry_alloca`](crate::convert::ops::stack_slot::entry_alloca)), so SROA
+/// returns the value to registers once the payload reads are resolved; only
+/// the store stays at the use site.
 pub(super) fn spill_enum_value(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -42,19 +41,12 @@ pub(super) fn spill_enum_value(
     llvm_struct_ty: TypeHandle,
     abi_align: u64,
 ) -> Value {
-    let i64_ty = IntegerType::get(ctx, 64, Signedness::Signless);
-    let one_apint = APInt::from_i64(1, NonZeroUsize::new(64).unwrap());
-    let one_attr = pliron::builtin::attributes::IntegerAttr::new(i64_ty, one_apint);
-    let one_const = llvm::ConstantOp::new(ctx, Box::new(one_attr));
-    rewriter.insert_operation(ctx, one_const.get_operation());
-    let one_val = one_const.get_operation().deref(ctx).get_result(0);
-
-    let alloca_op = llvm::AllocaOp::new(ctx, llvm_struct_ty, one_val, 0);
-    rewriter.insert_operation(ctx, alloca_op.get_operation());
-    if abi_align > 0 {
-        llvm_export::ops::set_op_alignment(ctx, alloca_op.get_operation(), abi_align as u32);
-    }
-    let slot_ptr = alloca_op.get_operation().deref(ctx).get_result(0);
+    let slot_ptr = crate::convert::ops::stack_slot::entry_alloca(
+        ctx,
+        rewriter,
+        llvm_struct_ty,
+        (abi_align > 0).then_some(abi_align),
+    );
 
     let store_op = llvm::StoreOp::new(ctx, enum_val, slot_ptr);
     rewriter.insert_operation(ctx, store_op.get_operation());

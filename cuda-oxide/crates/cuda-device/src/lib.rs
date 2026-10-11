@@ -41,6 +41,7 @@ pub mod grid;
 pub mod i16x2;
 pub mod iket;
 pub mod int;
+pub mod math;
 pub mod mma_frag;
 pub mod prmt;
 pub mod ptx;
