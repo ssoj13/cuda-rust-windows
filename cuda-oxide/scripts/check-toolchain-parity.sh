@@ -148,6 +148,12 @@ markdown = [
 ]
 dated = re.compile(r"nightly-\d{4}-\d{2}-\d{2}")
 for path in markdown:
+    # Measurement provenance records the tools actually used, not an install pin.
+    # The generated reference repeats that retained evidence verbatim.
+    if path.startswith("cuda-oxide/intrinsics/evidence/") or path == (
+        "cuda-oxide/intrinsics/generated-reference.md"
+    ):
+        continue
     for number, line in enumerate(read(os.path.join(git_root, path)).splitlines(), start=1):
         if dated.search(line):
             failures.append(f"{path}:{number} contains a dated nightly")
