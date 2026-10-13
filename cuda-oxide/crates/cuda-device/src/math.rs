@@ -68,11 +68,7 @@ fn sin_reduced(t: f32, quadrant: u32) -> f32 {
     let lead = if cosine { 1.0 } else { t };
     let lead_s = mul_add(s, lead, 0.0);
     let p = if cosine {
-        mul_add(
-            f32::from_bits(0x37CB_AC00),
-            s,
-            f32::from_bits(0xBAB6_07ED),
-        )
+        mul_add(f32::from_bits(0x37CB_AC00), s, f32::from_bits(0xBAB6_07ED))
     } else {
         f32::from_bits(0xB94D_4153)
     };
