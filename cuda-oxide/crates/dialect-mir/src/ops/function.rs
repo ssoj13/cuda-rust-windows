@@ -73,7 +73,7 @@ fn inline_intent_key() -> Identifier {
 /// |----------------|-----------|------------------------------------|
 /// | `sym_name`     | StringAttr| Function name (from SymbolOpInterface) |
 /// | `mir_func_type`| TypeAttr  | Function type (mir.func_type)      |
-/// | `reference_param_validity_N` | ReferenceParamValidityAttr | Proven nonnull/alignment for source argument `N` on a kernel entry |
+/// | `reference_param_validity_N` | ReferenceParamValidityAttr | Proven reference facts for source argument `N` on a kernel entry |
 /// | `cuda_oxide_inline_intent` | StringAttr | The source `#[inline]` intent as its LLVM keyword ([`InlineIntent`]); never on a kernel |
 /// ```
 ///
@@ -124,8 +124,9 @@ impl MirFuncOp {
 
     /// Record rustc-proven validity for one source-level kernel argument.
     ///
-    /// Presence proves `nonnull`; the payload carries the rustc ABI alignment
-    /// of the pointee. The source argument index is deliberately retained until
+    /// Presence proves `nonnull`; the payload carries the pointee alignment
+    /// and independently proven aliasing and size facts.
+    /// The source argument index is deliberately retained until
     /// kernel ABI lowering decides which physical LLVM parameter represents it.
     pub fn set_reference_param_validity(
         &self,
@@ -161,14 +162,19 @@ impl MirFuncOp {
         );
     }
 
-    /// The recorded `#[inline]` intent; None when the source had none. A value
-    /// naming no intent is an error, never read as "none": dropping a
-    /// `noinline` silently would change the generated code.
+    /// The recorded `#[inline]` intent; None when the source had none. A present
+    /// attribute with the wrong type or an unknown keyword is an error, never
+    /// read as "none": dropping a `noinline` silently would change the generated code.
     pub fn inline_intent(&self, ctx: &Context) -> Result<Option<InlineIntent>, String> {
         let op = self.get_operation().deref(ctx);
-        let Some(value) = op.attributes.get::<StringAttr>(&inline_intent_key()) else {
+        let key = inline_intent_key();
+        if !op.attributes.0.contains_key(&key) {
             return Ok(None);
-        };
+        }
+        let value = op
+            .attributes
+            .get::<StringAttr>(&key)
+            .ok_or_else(|| "inline intent attribute must be a string".to_string())?;
         let keyword = String::from(value.clone());
         InlineIntent::from_llvm_keyword(&keyword)
             .map(Some)
@@ -330,12 +336,12 @@ impl Verify for MirFuncOp {
                     key_text
                 );
             };
-            if validity.0 == 0 || !validity.0.is_power_of_two() {
+            if validity.pointee_alignment == 0 || !validity.pointee_alignment.is_power_of_two() {
                 return verify_err!(
                     op.loc(),
                     "MirFuncOp reference validity alignment on argument {} must be a non-zero power of two, found {}",
                     index,
-                    validity.0
+                    validity.pointee_alignment
                 );
             }
 

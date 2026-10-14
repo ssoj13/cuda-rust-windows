@@ -10,8 +10,8 @@
 // that would silently reject non-`'static` borrowing closures).
 //
 // We accept the `internal_features` warning here: cuda-oxide already ships
-// `rustc_codegen_cuda` against `rustc_private` and pins a nightly
-// toolchain, so the broader project is firmly inside rustc's internal API
+// `rustc_codegen_cuda` against `rustc_private` with internal APIs enabled
+// on stable Rust, so the broader project is inside rustc's internal API
 // surface. Anyone trying to lift this helper to a stable crate will hit
 // the same gate and have to make the same trade-off there.
 #![feature(core_intrinsics)]
