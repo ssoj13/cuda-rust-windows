@@ -70,7 +70,7 @@ required for `ptxas` and header files, but you will not be able to run kernels.
 ## Install LLVM (usually optional)
 
 The codegen pipeline emits LLVM IR and invokes `llc` to produce PTX. The
-stable Rust toolchain ships LLVM 22 with the NVPTX backend enabled via the
+stable Rust 1.99 toolchain ships LLVM 23 with the NVPTX backend enabled via the
 `llvm-tools` component, so the recommended
 path is:
 
@@ -165,7 +165,7 @@ cargo +stable install --locked --path crates/cargo-oxide
 For standalone use, install it from Git with the stable toolchain:
 
 ```bash
-cargo +stable install --locked --git https://github.com/ansidium/cuda-rust-windows.git --rev 53adc37eb7af836ff014c1204f0d9327dbeb1330 cargo-oxide
+cargo +stable install --locked --git https://github.com/ansidium/cuda-rust-windows.git --rev acc0f43960fe9a575f10ddef26dd82255400c23d cargo-oxide
 ```
 
 On first run, `cargo-oxide` automatically fetches and builds the codegen backend

@@ -142,6 +142,23 @@ from upstream:
 
 ## Current Divergence Log
 
+## 2026-10-12 - Stable compiler compatibility
+
+- Branch: `main`.
+- Upstream baseline: `upstream/main@d141118c05f705fcf932a8e9077dc714477edc4d`.
+- Files/area: MIR reference-parameter ABI facts, codegen backend, and host
+  kernel type identifiers.
+- Intentional divergence: use stable Rust rather than upstream's dated
+  nightly. Read ABI attributes through typed `rustc_internal` APIs where
+  stable `rustc_public` still exposes opaque values. Retain the upstream
+  `NoFree` requirement for dereferenceability and do not export `ReadOnly`.
+- Linux impact: the same stable compiler adaptation applies on both hosts;
+  CUDA discovery and runtime behavior remain platform-scoped.
+- Windows validation: the sync checks, reference-validity kernels, and
+  hosted MSVC canary cover this compiler adaptation.
+- Follow-up: remove the internal ABI bridge when stable `rustc_public`
+  exposes the attributes directly.
+
 ## 2026-10-10 - Lowering temporaries in the entry block; local-memory-free sin_cos
 
 - Branch: `perf/entry-block-allocas`, merged into `main` of `ssoj13/cuda-rust-windows`.
