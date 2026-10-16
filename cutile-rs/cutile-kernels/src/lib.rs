@@ -8,9 +8,9 @@
 //! Reusable cuTile kernels.
 //!
 //! Kernel modules are grouped by function: attention, norms, positional
-//! encoding, KV-cache updates, argmax/sampling, embeddings, and pointwise
-//! transformer utilities. Raw-pointer and benchmark-oriented kernels live under
-//! `experimental`.
+//! encoding, KV-cache updates, argmax/sampling, embeddings, pointwise
+//! transformer utilities, and training backward/loss/optimizer kernels. Raw-pointer
+//! and benchmark-oriented kernels live under `experimental`.
 
 pub mod argmax;
 pub mod attention;
@@ -20,17 +20,34 @@ pub mod kv_cache;
 pub mod norms;
 pub mod pointwise;
 pub mod positional;
+pub mod training;
 
 pub use argmax::{argmax_blocks_f16, argmax_reduce_blocks_to_u32, lm_head_argmax_blocks_f16};
 pub use attention::{
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, splitk_reduce_merge,
 };
-pub use embeddings::embedding_batch_f16;
-pub use kv_cache::{kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16};
-pub use norms::{add_rms_norm_f16, qk_norm_f16, rms_norm_f16};
-pub use pointwise::{add_2d_f16, gather_row_f16, silu_mul_2d_f16};
-pub use positional::{qk_rope_dynpos_f16, rope_seq_dynpos_f16, rope_seq_f16};
+pub use embeddings::{embedding_batch_bf16, embedding_batch_f16};
+pub use kv_cache::{
+    kv_cache_update_seq_bf16, kv_cache_update_seq_dynpos_bf16, kv_cache_update_seq_dynpos_f16,
+    kv_cache_update_seq_f16,
+};
+pub use norms::{
+    add_rms_norm_bf16, add_rms_norm_f16, layer_norm_bf16, layer_norm_f16, qk_norm_bf16,
+    qk_norm_f16, rms_norm_bf16, rms_norm_f16,
+};
+pub use pointwise::{
+    add_2d_bf16, add_2d_f16, gather_row_bf16, gather_row_f16, silu_mul_2d_bf16, silu_mul_2d_f16,
+};
+pub use positional::{
+    qk_rope_dynpos_bf16, qk_rope_dynpos_f16, rope_seq_bf16, rope_seq_dynpos_bf16,
+    rope_seq_dynpos_f16, rope_seq_f16,
+};
+pub use training::{
+    cross_entropy_fwd_bwd_bf16, fused_adamw_bf16, layer_norm_bwd_dx_bf16, layer_norm_bwd_dx_f16,
+    rms_norm_bwd_dx_bf16, rms_norm_bwd_dx_f16, rope_seq_bwd_bf16, rope_seq_bwd_f16,
+    silu_mul_bwd_2d_bf16, silu_mul_bwd_2d_f16,
+};
 
 // Kinds that fire during a normal transformer inference path (decode CUDA graph
 // + step-graph prefill) and therefore may need warmup to pre-pay JIT cost.
