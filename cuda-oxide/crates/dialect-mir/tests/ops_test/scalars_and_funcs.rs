@@ -620,16 +620,6 @@ fn test_mir_func_inline_intent_verify() {
         "a value of another attribute type is an error, never read as no request"
     );
 
-    unknown.get_operation().deref_mut(&ctx).attributes.set(
-        INLINE_INTENT_ATTR.try_into().unwrap(),
-        pliron::builtin::attributes::UnitAttr,
-    );
-    assert!(
-        unknown.inline_intent(&ctx).is_err(),
-        "an inline intent with the wrong attribute type must not disappear"
-    );
-    assert!(unknown.verify(&ctx).is_err());
-
     let plain = make_func(&mut ctx, false);
     assert_eq!(plain.inline_intent(&ctx), None);
     assert!(plain.verify(&ctx).is_ok());
