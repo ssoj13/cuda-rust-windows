@@ -30,6 +30,12 @@ contribution guide. There is no root `Justfile`. The SIMT recipes live in
 
 - `cuda-bindings/`, `cuda-core/`, `cuda-core-derive/`, and `cuda-async/` — shared
   host crates in the root workspace. Both kernel stacks depend on these by path.
+  `cuda-bindings` ships committed bindgen output (`cuda-bindings/generated/<target>/` +
+  `meta.json`), so building needs no CUDA toolkit or libclang. After a toolkit bump or any
+  change to the generator, run `cargo xtask bindings` (host target; per-target and WSL/cross
+  procedure in `cuda-bindings/README.md`) and commit the result. The generator lives in
+  `xtask/`; `cargo test -p xtask` regenerates and compares when a toolkit is present
+  (`CUDA_BINDINGS_REQUIRE_TOOLKIT=1` makes a missing toolkit a failure).
 - `cuda-oxide/` — the SIMT model. Its `Cargo.toml` explicitly lists workspace
   members under `crates/`; this fork's `rust-toolchain.toml` selects stable and
   `.cargo/config.toml` enables `rustc_private`. The book is `cuda-oxide/cuda-oxide-book/`, and

@@ -180,5 +180,5 @@ pub fn curand_load_error() -> Option<&'static DynLoadError> {
     curand_api().err()
 }
 
-include!(concat!(env!("OUT_DIR"), "/cuda_driver_shims.rs"));
-include!(concat!(env!("OUT_DIR"), "/curand_shims.rs"));
+include!(concat!(env!("CUDA_BINDINGS_GENERATED"), "/cuda_driver_shims.rs"));
+include!(concat!(env!("CUDA_BINDINGS_GENERATED"), "/curand_shims.rs"));

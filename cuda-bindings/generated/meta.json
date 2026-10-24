@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "targets": {
+    "aarch64-unknown-linux-gnu": {
+      "cfgs": [
+        "cu_mem_location_anon_union",
+        "cuda_has_cuEventElapsedTime_v2",
+        "cuda_has_cuLaunchHostFunc_v2",
+        "cuda_has_multicast"
+      ],
+      "cuda_h_sha256": "31df84e16179b6d97db4b3c0bae7697392a370b41983f4a8962f0e5a8069b577",
+      "cuda_version": 13030,
+      "curand_h_sha256": "fb12e35bc4e7b298d220b50560df876d074ca97707ca59ac464dfb7b26c8a19a"
+    },
+    "x86_64-pc-windows-msvc": {
+      "cfgs": [
+        "cu_mem_location_anon_union",
+        "cuda_has_cuEventElapsedTime_v2",
+        "cuda_has_cuLaunchHostFunc_v2",
+        "cuda_has_multicast"
+      ],
+      "cuda_h_sha256": "31df84e16179b6d97db4b3c0bae7697392a370b41983f4a8962f0e5a8069b577",
+      "cuda_version": 13030,
+      "curand_h_sha256": "b6de29df4e3f846d10699abf7c41d0150e5f571e56c7e7b5061b4ecf4e33e3f1"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "cfgs": [
+        "cu_mem_location_anon_union",
+        "cuda_has_cuEventElapsedTime_v2",
+        "cuda_has_cuLaunchHostFunc_v2",
+        "cuda_has_multicast"
+      ],
+      "cuda_h_sha256": "31df84e16179b6d97db4b3c0bae7697392a370b41983f4a8962f0e5a8069b577",
+      "cuda_version": 13030,
+      "curand_h_sha256": "fb12e35bc4e7b298d220b50560df876d074ca97707ca59ac464dfb7b26c8a19a"
+    }
+  }
+}

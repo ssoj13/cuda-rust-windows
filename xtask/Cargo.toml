@@ -1,0 +1,30 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Developer tasks for the host workspace: regenerates the committed cuda-bindings."
+license = "Apache-2.0"
+publish = false
+
+[lib]
+path = "src/xtask.rs"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+bindgen = "0.69.4"
+prettyplease = "0.2.35"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1.0.35"
+serde_json = "1"
+sha2 = "0.10"
+syn = { version = "2.0", features = ["full", "extra-traits", "visit", "visit-mut", "fold"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

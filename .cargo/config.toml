@@ -1,0 +1,3 @@
+# `cargo xtask bindings` regenerates cuda-bindings/generated/ (see cuda-bindings/README.md).
+[alias]
+xtask = "run --quiet -p xtask --"
