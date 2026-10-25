@@ -279,6 +279,62 @@ fi
     }
 
     #[test]
+    fn split_compile_changes_native_assembly_identity_without_changing_ptx() {
+        let input = NamedInput::new("kernel.ptx", b"same PTX");
+        let serial = options();
+        let parallel = serial
+            .clone()
+            .with_ptxas_split_compile(std::num::NonZeroU32::new(4).unwrap());
+        assert_ne!(
+            ptx_assembly_artifact_digest_parts(input, &serial, &[3; 32]),
+            ptx_assembly_artifact_digest_parts(input, &parallel, &[3; 32]),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_compile_subprocess_retains_the_full_helper_diagnostics() {
+        let script = r#"
+output=
+split=no
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --split-compile=4) split=yes ;;
+    --output-file) shift; output="$1" ;;
+  esac
+  shift
+done
+[ "$split" = yes ] || exit 9
+cp "$(dirname "$0")/fixture.cubin" "$output"
+echo "ptxas info : Compiling entry function 'kernel'" >&2
+echo "ptxas info : Function properties for kernel" >&2
+echo "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads" >&2
+echo "ptxas info : Used 7 registers" >&2
+echo "ptxas info : Function properties for helper" >&2
+echo "    16 bytes stack frame, 4 bytes spill stores, 8 bytes spill loads" >&2
+"#;
+        let (_directory, path) = fake_ptxas(script, Some(&minimal_cubin()));
+        let assembler = PtxAssembler::from_path(path).unwrap();
+        let options = options().with_ptxas_split_compile(std::num::NonZeroU32::new(4).unwrap());
+        let report = assembler
+            .assemble_ptx_with_report(NamedInput::new("kernel.ptx", b"PTX"), &options)
+            .unwrap();
+        assert!(
+            report
+                .info_log
+                .as_deref()
+                .unwrap()
+                .contains("Function properties for helper")
+        );
+        let helper = report
+            .resource_usage
+            .iter()
+            .find(|row| row.kernel == "helper")
+            .unwrap();
+        assert_eq!((helper.spill_store_bytes, helper.spill_load_bytes), (4, 8));
+    }
+
+    #[test]
     fn assembly_digest_covers_name_bytes_options_and_tool() {
         let options = options();
         let base = ptx_assembly_artifact_digest_parts(

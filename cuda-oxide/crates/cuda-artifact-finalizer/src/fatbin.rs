@@ -20,8 +20,10 @@ use crate::link::logical_ptx;
 use crate::provenance::StableDigest;
 use crate::tool::{FATBINARY, PTXAS, PinnedTool, TemporaryDirectory};
 use crate::{CudaArch, FinalizationOptions, FinalizerError, NamedInput, PtxAssembler};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// `fatbinary` file magic (`0xBA55ED50`, little-endian) and header length.
@@ -34,6 +36,24 @@ pub struct FatbinReport {
     pub image: Vec<u8>,
     /// Per-architecture kernel resource usage, in the order of the cubins.
     pub resource_usage: Vec<(CudaArch, Vec<KernelResourceUsage>)>,
+    /// Exact per-architecture compiler diagnostics, separate from runtime payloads.
+    pub ptxas_reports: Vec<PtxasReport>,
+    /// SHA-256 of the logical PTX bytes actually passed to ptxas.
+    pub ptx_sha256: [u8; 32],
+    /// Pinned assembler executable and its content identity.
+    pub ptxas_path: PathBuf,
+    /// SHA-256 of the assembler that produced these cubins.
+    pub ptxas_sha256: [u8; 32],
+}
+
+/// One native assembly's options and complete raw compiler output.
+pub struct PtxasReport {
+    /// Target architecture of this assembly.
+    pub target: CudaArch,
+    /// Actual standalone ptxas policy options, including verbose reporting.
+    pub options: Vec<String>,
+    /// Full output, retained even when some resource fields were not reported.
+    pub info_log: Option<String>,
 }
 
 /// Pinned `ptxas` and `fatbinary` pair that turns one linked PTX module into
@@ -81,8 +101,9 @@ impl FatbinBuilder {
     /// `options.target()` is the architecture the PTX was generated for; each
     /// requested architecture must be at least that one, because `ptxas`
     /// cannot lower PTX to an older GPU. FMA and debug policy apply to every
-    /// cubin. Cubins are assembled concurrently, at most one `ptxas` process
-    /// per available core.
+    /// cubin. Serial assemblers may run concurrently, at most one process per
+    /// available core. Explicit split compilation serializes the architectures
+    /// so their internal thread limits do not multiply.
     pub fn build(
         &self,
         ptx: NamedInput<'_>,
@@ -93,10 +114,17 @@ impl FatbinBuilder {
         crate::validate_name(ptx.name)?;
         let logical = logical_ptx(ptx)?;
         let input = NamedInput::new(ptx.name, logical);
+        let ptxas_sha256 = self
+            .assembler
+            .ptxas_digest()
+            .ok_or(FinalizerError::ToolIdentityChanged { tool: "ptxas" })?;
 
-        // One ptxas process per cubin, at most one per available core: each
-        // holds the whole module in memory.
-        let workers = std::thread::available_parallelism().map_or(1, usize::from);
+        // Each assembler holds the whole module in memory. An explicit internal
+        // thread budget replaces, rather than multiplies, arch-level concurrency.
+        let workers = architecture_workers(
+            std::thread::available_parallelism().map_or(1, usize::from),
+            options.ptxas_split_compile().get(),
+        );
         let mut reports = Vec::with_capacity(targets.len());
         for batch in targets.chunks(workers) {
             reports.extend(std::thread::scope(|scope| {
@@ -105,9 +133,15 @@ impl FatbinBuilder {
                     .map(|target| {
                         let options = FinalizationOptions::new(target.clone())
                             .with_fma_contraction(options.allow_fma_contraction())
-                            .with_debug_policy(options.debug_policy());
-                        scope
-                            .spawn(move || self.assembler.assemble_ptx_with_report(input, &options))
+                            .with_debug_policy(options.debug_policy())
+                            .with_ptxas_split_compile(options.ptxas_split_compile());
+                        scope.spawn(move || {
+                            let mut arguments = options.ptxas_options();
+                            arguments.push("--verbose".to_string());
+                            self.assembler
+                                .assemble_ptx_with_report(input, &options)
+                                .map(|report| (arguments, report))
+                        })
                     })
                     .collect::<Vec<_>>();
                 jobs.into_iter()
@@ -127,7 +161,7 @@ impl FatbinBuilder {
             OsString::from("-64"),
             OsString::from("--compress-all"),
         ];
-        for (target, report) in targets.iter().zip(&reports) {
+        for (target, (_, report)) in targets.iter().zip(&reports) {
             let cubin_path = directory.path().join(format!("{}.cubin", target.sm()));
             fs::write(&cubin_path, &report.image).map_err(|source| FinalizerError::Io {
                 path: cubin_path.clone(),
@@ -147,14 +181,36 @@ impl FatbinBuilder {
         if !is_valid_fatbin(&image) {
             return Err(FinalizerError::InvalidFatbin);
         }
+        if self.assembler.ptxas_digest() != Some(ptxas_sha256) {
+            return Err(FinalizerError::ToolIdentityChanged { tool: "ptxas" });
+        }
+        let mut resource_usage = Vec::with_capacity(targets.len());
+        let mut ptxas_reports = Vec::with_capacity(targets.len());
+        for (target, (options, report)) in targets.into_iter().zip(reports) {
+            resource_usage.push((target.clone(), report.resource_usage));
+            ptxas_reports.push(PtxasReport {
+                target,
+                options,
+                info_log: report.info_log,
+            });
+        }
         Ok(FatbinReport {
             image,
-            resource_usage: targets
-                .into_iter()
-                .zip(reports)
-                .map(|(target, report)| (target, report.resource_usage))
-                .collect(),
+            resource_usage,
+            ptxas_reports,
+            ptx_sha256: Sha256::digest(logical).into(),
+            ptxas_path: self.assembler.ptxas_path().to_path_buf(),
+            ptxas_sha256,
         })
+    }
+}
+
+/// Avoid multiplying explicit per-assembler threads by concurrent architectures.
+fn architecture_workers(available: usize, split_compile: u32) -> usize {
+    if split_compile > 1 {
+        1
+    } else {
+        available.max(1)
     }
 }
 
@@ -205,6 +261,13 @@ pub fn is_valid_fatbin(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_split_threads_do_not_multiply_across_architectures() {
+        assert_eq!(architecture_workers(16, 1), 16);
+        assert_eq!(architecture_workers(0, 1), 1);
+        assert_eq!(architecture_workers(16, 4), 1);
+    }
 
     fn arch(name: &str) -> CudaArch {
         name.parse().unwrap()

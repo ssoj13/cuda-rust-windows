@@ -4,6 +4,7 @@
  */
 
 use libnvvm_sys::CudaArch;
+use std::num::NonZeroU32;
 
 /// Amount of device debug information preserved during finalization.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -47,6 +48,7 @@ pub struct FinalizationOptions {
     target: CudaArch,
     allow_fma_contraction: bool,
     debug: DebugPolicy,
+    ptxas_split_compile: NonZeroU32,
 }
 
 impl FinalizationOptions {
@@ -56,6 +58,7 @@ impl FinalizationOptions {
             target,
             allow_fma_contraction: true,
             debug: DebugPolicy::None,
+            ptxas_split_compile: NonZeroU32::MIN,
         }
     }
 
@@ -71,6 +74,22 @@ impl FinalizationOptions {
     pub fn with_debug_policy(mut self, debug: DebugPolicy) -> Self {
         self.debug = debug;
         self
+    }
+
+    /// Bound the optimization threads used by standalone ptxas assembly.
+    ///
+    /// One preserves the tool's serial default. Zero (automatic use of all
+    /// CPUs) is deliberately unrepresentable, so callers retain an explicit
+    /// machine-resource budget. This does not change FMA or register policy.
+    #[must_use]
+    pub fn with_ptxas_split_compile(mut self, threads: NonZeroU32) -> Self {
+        self.ptxas_split_compile = threads;
+        self
+    }
+
+    /// Explicit optimization-thread limit for standalone ptxas assembly.
+    pub fn ptxas_split_compile(&self) -> NonZeroU32 {
+        self.ptxas_split_compile
     }
 
     /// Concrete CUDA architecture used by both compiler stages.
@@ -134,6 +153,9 @@ impl FinalizationOptions {
             format!("--gpu-name={}", self.target.sm()),
             format!("--fmad={}", self.allow_fma_contraction),
         ];
+        if self.ptxas_split_compile.get() > 1 {
+            options.push(format!("--split-compile={}", self.ptxas_split_compile));
+        }
         match self.debug {
             DebugPolicy::None => {}
             DebugPolicy::LineTables => options.push("--generate-line-info".to_string()),
@@ -358,5 +380,29 @@ mod tests {
                 [expected]
             );
         }
+    }
+    #[test]
+    fn ptxas_split_compile_is_explicit_and_leaves_other_compiler_policies_alone() {
+        let serial = FinalizationOptions::new("sm_86".parse().unwrap());
+        assert_eq!(serial.ptxas_split_compile().get(), 1);
+        assert_eq!(serial.ptxas_options(), ["--gpu-name=sm_86", "--fmad=true"]);
+        let parallel = serial
+            .clone()
+            .with_ptxas_split_compile(NonZeroU32::new(4).unwrap());
+        assert_eq!(
+            parallel.ptxas_options(),
+            ["--gpu-name=sm_86", "--fmad=true", "--split-compile=4"]
+        );
+        assert_eq!(
+            serial.nvvm_compile_options(),
+            parallel.nvvm_compile_options()
+        );
+        assert_eq!(
+            serial.nvjitlink_ptx_options(),
+            parallel.nvjitlink_ptx_options()
+        );
+        assert!(parallel.allow_fma_contraction());
+        assert_eq!(parallel.debug_policy(), DebugPolicy::None);
+        assert_ne!(serial, parallel);
     }
 }

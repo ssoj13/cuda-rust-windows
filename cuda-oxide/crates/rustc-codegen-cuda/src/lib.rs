@@ -894,6 +894,22 @@ fn write_device_artifact_object(
     }
     let fatbin = fatbin_for_embedding(fatbin_targets, result, artifact)?;
     if let Some(fatbin) = fatbin.as_ref() {
+        let mut entries = functions
+            .iter()
+            .filter(|function| function.is_kernel)
+            .map(|function| function.export_name.clone())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for path in materialize::write_ptxas_reports(
+            output_dir,
+            output_name,
+            host_target,
+            &artifact.name,
+            &entries,
+            fatbin,
+        )? {
+            eprintln!("cuda-oxide: ptxas assembly receipt {}", path.display());
+        }
         let reports = fatbin
             .resource_usage
             .iter()

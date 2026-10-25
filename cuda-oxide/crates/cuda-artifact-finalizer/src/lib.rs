@@ -21,7 +21,7 @@ mod tool;
 mod validation;
 
 pub use diagnostics::KernelResourceUsage;
-pub use fatbin::{FatbinBuilder, FatbinReport, is_valid_fatbin};
+pub use fatbin::{FatbinBuilder, FatbinReport, PtxasReport, is_valid_fatbin};
 pub use libnvvm_sys::{CudaArch, CudaArchParseError, LibdeviceNotFound, NvvmError, find_libdevice};
 pub use link::{LinkReport, LtoLinker};
 pub use nvjitlink_sys::NvJitLinkError;
