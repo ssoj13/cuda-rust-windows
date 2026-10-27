@@ -22,6 +22,7 @@ use dialect_mir::ops::{
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::types::{IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
+use pliron::linked_list::ContainsLinkedList;
 use pliron::location::Location;
 use pliron::op::Op;
 use pliron::operation::Operation;
@@ -611,7 +612,80 @@ pub(super) fn emit_array_subslice_value(
 ///
 /// `is_mutable` governs the mutability of intermediate pointer types; the
 /// final result pointer also carries this mutability.
+#[allow(clippy::too_many_arguments)]
 fn translate_place_addr_from_slot(
+    ctx: &mut Context,
+    body: &mir::Body,
+    value_map: &ValueMap,
+    slot: Value,
+    projection: &[mir::ProjectionElem],
+    is_mutable: bool,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    loc: Location,
+) -> TranslationResult<Option<(Value, Option<Ptr<Operation>>)>> {
+    let stop_at: Option<Ptr<Operation>> = match prev_op {
+        Some(prev) => block_ptr
+            .deref(ctx)
+            .iter(ctx)
+            .skip_while(|&op| op != prev)
+            .nth(1),
+        None => block_ptr.deref(ctx).iter(ctx).next(),
+    };
+    let result = translate_place_addr_from_slot_inner(
+        ctx,
+        body,
+        value_map,
+        slot,
+        projection,
+        is_mutable,
+        block_ptr,
+        prev_op,
+        loc,
+    );
+    if matches!(result, Ok(None) | Err(_)) {
+        rollback_ops_after(ctx, block_ptr, prev_op, stop_at);
+    }
+    result
+}
+
+/// Erase any operations inserted into `block_ptr` between `prev_op` (exclusive)
+/// and `stop_at` (exclusive).
+///
+/// When [`translate_place_addr_from_slot`] punts (`Ok(None)`) or fails (`Err`)
+/// after earlier projection steps (such as `ProjectionElem::Deref`) have
+/// already linked intermediate IR operations after `prev_op`, those operations
+/// must be unlinked and erased so a caller fallback (such as value-copy
+/// `translate_place`) does not insert subsequent operations and the block
+/// terminator *before* the orphaned ops. Erasing in reverse block order
+/// removes users before their definitions.
+fn rollback_ops_after(
+    ctx: &mut Context,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    stop_at: Option<Ptr<Operation>>,
+) {
+    let inserted_ops: Vec<Ptr<Operation>> = match prev_op {
+        Some(prev) => block_ptr
+            .deref(ctx)
+            .iter(ctx)
+            .skip_while(|&op| op != prev)
+            .skip(1)
+            .take_while(|&op| Some(op) != stop_at)
+            .collect(),
+        None => block_ptr
+            .deref(ctx)
+            .iter(ctx)
+            .take_while(|&op| Some(op) != stop_at)
+            .collect(),
+    };
+    for op in inserted_ops.into_iter().rev() {
+        Operation::erase(op, ctx);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn translate_place_addr_from_slot_inner(
     ctx: &mut Context,
     body: &mir::Body,
     value_map: &ValueMap,
@@ -1469,5 +1543,136 @@ mod tests {
         let deep: TypeHandle =
             MirStructType::get(&mut ctx, "Deep".into(), vec!["inner".into()], vec![inner]).into();
         assert!(enum_payload_needs_storage_coercion(&ctx, deep));
+    }
+
+    #[test]
+    fn punt_after_deref_rolls_back_orphaned_load_ops() {
+        use dialect_mir::attributes::FieldIndexAttr;
+        use dialect_mir::ops::MirGotoOp;
+        use dialect_mir::types::MirTupleType;
+        use pliron::builtin::attributes::IntegerAttr;
+
+        let mut ctx = Context::new();
+        crate::translator::register_dialects(&mut ctx);
+
+        let u32_ty = IntegerType::get(&ctx, 32, Signedness::Unsigned);
+        let u32_handle: TypeHandle = u32_ty.into();
+        let pair_ty: TypeHandle = MirTupleType::get(&mut ctx, vec![u32_handle, u32_handle]).into();
+        let pair_ptr_ty: TypeHandle = MirPtrType::get_generic(&mut ctx, pair_ty, false).into();
+        let u32_ptr_ty: TypeHandle = MirPtrType::get_generic(&mut ctx, u32_handle, false).into();
+        let slot_of_u32_ptr_ty: TypeHandle =
+            MirPtrType::get_generic(&mut ctx, u32_ptr_ty, false).into();
+
+        let block_ptr = BasicBlock::new(&mut ctx, None, vec![pair_ptr_ty, slot_of_u32_ptr_ty]);
+        let target_block = BasicBlock::new(&mut ctx, None, vec![]);
+        let pair_slot = block_ptr.deref(&ctx).get_argument(0);
+        let ptr_slot = block_ptr.deref(&ctx).get_argument(1);
+
+        let const_attr =
+            IntegerAttr::new(u32_ty, APInt::from_u64(7, NonZeroUsize::new(32).unwrap()));
+        let prev_op = Operation::new(
+            &mut ctx,
+            MirConstantOp::get_concrete_op_info(),
+            vec![u32_handle],
+            vec![],
+            vec![],
+            0,
+        );
+        prev_op.deref_mut(&ctx).set_loc(Location::Unknown);
+        MirConstantOp::new(prev_op).set_attr_value(&ctx, const_attr);
+        prev_op.insert_at_front(block_ptr, &ctx);
+
+        let stop_at: Option<Ptr<Operation>> = block_ptr
+            .deref(&ctx)
+            .iter(&ctx)
+            .skip_while(|&op| op != prev_op)
+            .nth(1);
+        assert!(stop_at.is_none());
+
+        // 1. Direct rollback of dependent MirLoadOp + MirExtractFieldOp after prev_op.
+        let load_op = Operation::new(
+            &mut ctx,
+            MirLoadOp::get_concrete_op_info(),
+            vec![pair_ty],
+            vec![pair_slot],
+            vec![],
+            0,
+        );
+        load_op.deref_mut(&ctx).set_loc(Location::Unknown);
+        load_op.insert_after(&ctx, prev_op);
+        let loaded_pair = load_op.deref(&ctx).get_result(0);
+
+        let extract_op = Operation::new(
+            &mut ctx,
+            MirExtractFieldOp::get_concrete_op_info(),
+            vec![u32_handle],
+            vec![loaded_pair],
+            vec![],
+            0,
+        );
+        extract_op.deref_mut(&ctx).set_loc(Location::Unknown);
+        MirExtractFieldOp::new(extract_op).set_attr_index(&ctx, FieldIndexAttr(0));
+        extract_op.insert_after(&ctx, load_op);
+
+        assert_eq!(block_ptr.deref(&ctx).iter(&ctx).count(), 3);
+        rollback_ops_after(&mut ctx, block_ptr, Some(prev_op), stop_at);
+        assert_eq!(
+            block_ptr.deref(&ctx).iter(&ctx).collect::<Vec<_>>(),
+            vec![prev_op]
+        );
+
+        // 2. End-to-end punt through translate_place_address after Deref emits MirLoadOp.
+        let local: mir::Local = 0;
+        let mut value_map = ValueMap::new(1);
+        value_map.set_slot(local, ptr_slot);
+        let rust_ty = rustc_public::ty::Ty::to_val(0);
+        let rust_span = rustc_public::ty::Span::to_val(0);
+        let body = mir::Body::new(
+            vec![],
+            vec![mir::LocalDecl {
+                ty: rust_ty,
+                span: rust_span,
+                mutability: mir::Mutability::Not,
+            }],
+            0,
+            vec![],
+            None,
+            rust_span,
+        );
+        let place = mir::Place {
+            local,
+            projection: vec![
+                mir::ProjectionElem::Deref,
+                mir::ProjectionElem::OpaqueCast(rust_ty),
+            ],
+        };
+        let walked = translate_place_address(
+            &mut ctx,
+            &body,
+            &value_map,
+            &place,
+            false,
+            block_ptr,
+            Some(prev_op),
+            Location::Unknown,
+        )
+        .expect("punt after Deref must return Ok(None)");
+        assert!(walked.is_none());
+
+        // 3. Emitting MirGotoOp after prev_op leaves MirGotoOp as the very last operation.
+        let goto_op = Operation::new(
+            &mut ctx,
+            MirGotoOp::get_concrete_op_info(),
+            vec![],
+            vec![],
+            vec![target_block],
+            0,
+        );
+        goto_op.deref_mut(&ctx).set_loc(Location::Unknown);
+        goto_op.insert_after(&ctx, prev_op);
+
+        let ops: Vec<Ptr<Operation>> = block_ptr.deref(&ctx).iter(&ctx).collect();
+        assert_eq!(ops, vec![prev_op, goto_op]);
+        assert_eq!(ops.last().copied(), Some(goto_op));
     }
 }
