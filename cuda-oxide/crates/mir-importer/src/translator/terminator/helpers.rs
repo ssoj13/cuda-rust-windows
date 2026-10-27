@@ -177,6 +177,23 @@ pub(crate) fn finish_destination_write(
             .store_local(ctx, local, value, block_ptr, Some(prev_op))
             .unwrap_or(prev_op)),
         PreparedDestinationWrite::Address(address) => {
+            let expected_ty = address
+                .get_type(ctx)
+                .deref(ctx)
+                .downcast_ref::<MirPtrType>()
+                .map(|ptr_ty| ptr_ty.pointee);
+            let (value, prev_op) = if let Some(expected_ty) = expected_ty {
+                let (coerced, cast_op) = crate::translator::values::maybe_ptr_coerce(
+                    ctx,
+                    value,
+                    expected_ty,
+                    block_ptr,
+                    Some(prev_op),
+                );
+                (coerced, cast_op.unwrap_or(prev_op))
+            } else {
+                (value, prev_op)
+            };
             let store_op = Operation::new(
                 ctx,
                 MirStoreOp::get_concrete_op_info(),
@@ -380,6 +397,32 @@ pub fn emit_function_call(
                 *argument = normalized;
                 last_op = normalized_last_op;
             }
+        }
+    } else {
+        // Ordinary Rust `mir.func` declarations also lower their formal pointer
+        // parameters in the generic address space (`addrspace(0)`), while caller
+        // locals may hold pointers inferred in concrete GPU address spaces such
+        // as constant (`addrspace(4)`), shared (`addrspace(3)`), global
+        // (`addrspace(1)`), or cluster-shared (`addrspace(7)`). Adapt only the
+        // address space at the call boundary when pointee, mutability, and
+        // pointer kind match the declared Rust argument type.
+        for (arg, argument) in args.iter().zip(arg_values.iter_mut()) {
+            let Ok(arg_rust_ty) = arg.ty(body.locals()) else {
+                continue;
+            };
+            let Ok(expected) = crate::translator::types::translate_type(ctx, &arg_rust_ty) else {
+                continue;
+            };
+            let (normalized, normalized_last_op) = normalize_foreign_pointer_argument(
+                ctx,
+                *argument,
+                expected,
+                block_ptr,
+                last_op,
+                loc.clone(),
+            );
+            *argument = normalized;
+            last_op = normalized_last_op;
         }
     }
 
